@@ -72,7 +72,7 @@ pub struct Config {
     pub type_vocab_size: usize,
 }
 
-#[wasm_bindgen]
+// #[wasm_bindgen]
 impl Model {
     pub fn from_pretrained(model_path: &str) -> Result<Self> {
         let weights = ModelWeights::load(model_path)?;
