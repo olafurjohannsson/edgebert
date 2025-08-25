@@ -2,6 +2,8 @@
 
 **A pure Rust + WASM implementation for BERT inference with minimal dependencies**
 
+# WIP
+
 [![crates.io]()](https://crates.io/crates/edgebert)
 [![docs.rs](https://docs.rs/edgebert/badge.svg)](https://docs.rs/edgebert)
 [![Build Status](https://github.com/olafurjohannssson/edgebert/workflows/CI/badge.svg)](https://github.com/your-username/edgebert/actions)
