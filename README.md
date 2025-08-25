@@ -4,7 +4,7 @@
 
 [![crates.io]()](https://crates.io/crates/edgebert)
 [![docs.rs](https://docs.rs/edgebert/badge.svg)](https://docs.rs/edgebert)
-[![Build Status](https://github.com/your-username/edgebert/workflows/CI/badge.svg)](https://github.com/your-username/edgebert/actions)
+[![Build Status](https://github.com/olafurjohannssson/edgebert/workflows/CI/badge.svg)](https://github.com/your-username/edgebert/actions)
 
 ---
 
