@@ -35,3 +35,35 @@ For server-side or desktop applications, you can use the library directly.
 [dependencies]
 edgebert = "0.1.0" # Replace with the actual version
 anyhow = "1.0"
+```
+
+###
+
+```rust
+
+use edgebert::Model;
+
+fn main() -> anyhow::Result<()> {
+    let model = Model::from_pretrained("minilm-l6-v2")?;
+    let texts = vec!["Hello world", "How are you?"];
+    let embeddings = model.encode_normalized(texts)?;
+    println!("Cosine similarity: {}", embeddings[0].iter().zip(&embeddings[1]).map(|(a,b)| a*b).sum::<f32>());
+    Ok(())
+}
+```
+
+```javascript
+
+import init, { WasmModel } from "./pkg/edgebert.js";
+
+async function runDemo() {
+  await init();
+  const weights = await fetch('minilm-l6-v2.safetensors').then(r => r.arrayBuffer());
+  const config = await fetch('minilm-l6-v2_config.json').then(r => r.text());
+  const tokenizer = await fetch('minilm-l6-v2_tokenizer.json').then(r => r.text());
+  const model = new WasmModel(new Uint8Array(weights), config, tokenizer);
+  const texts = ["Hello world", "How are you?"];
+  const embeddings = model.encode_normalized(texts);
+  console.log("Cosine similarity:", embeddings[0].reduce((s, v, i) => s + v * embeddings[1][i], 0));
+}
+```
