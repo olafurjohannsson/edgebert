@@ -33,37 +33,61 @@ For server-side or desktop applications, you can use the library directly.
 **`Cargo.toml`**
 ```toml
 [dependencies]
-edgebert = "0.1.0" # Replace with the actual version
+edgebert = "0.3.0"
 anyhow = "1.0"
 ```
 
-###
-
+**`main.rs`**
 ```rust
+use anyhow::Result;
+use edgebert::{Model, ModelType};
+fn main() -> Result<()> {
+    let model = Model::from_pretrained(ModelType::MiniLML6V2)?;
 
-use edgebert::Model;
+    let texts = vec!["Hello world", "How are you"];
+    let embeddings = model.encode(texts.clone(), true)?;
 
-fn main() -> anyhow::Result<()> {
-    let model = Model::from_pretrained("minilm-l6-v2")?;
-    let texts = vec!["Hello world", "How are you?"];
-    let embeddings = model.encode_normalized(texts)?;
-    println!("Cosine similarity: {}", embeddings[0].iter().zip(&embeddings[1]).map(|(a,b)| a*b).sum::<f32>());
+    for (i, embedding) in embeddings.iter().enumerate() {
+        let n = embedding.len().min(10);
+        println!("Text: {} == {:?}...", texts[i], &embedding[0..n]);
+    }
     Ok(())
 }
 ```
 
+### 2. WebAssembly
 ```javascript
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>EdgeBERT WASM Test</title>
+</head>
+<body>
+<script type="module">
+    import init, { WasmModel, WasmModelType } from './pkg/edgebert.js';
 
-import init, { WasmModel } from "./pkg/edgebert.js";
+    async function run() {
+        await init();
 
-async function runDemo() {
-  await init();
-  const weights = await fetch('minilm-l6-v2.safetensors').then(r => r.arrayBuffer());
-  const config = await fetch('minilm-l6-v2_config.json').then(r => r.text());
-  const tokenizer = await fetch('minilm-l6-v2_tokenizer.json').then(r => r.text());
-  const model = new WasmModel(new Uint8Array(weights), config, tokenizer);
-  const texts = ["Hello world", "How are you?"];
-  const embeddings = model.encode_normalized(texts);
-  console.log("Cosine similarity:", embeddings[0].reduce((s, v, i) => s + v * embeddings[1][i], 0));
-}
+        const model = await WasmModel.from_type(WasmModelType.MiniLML6V2);
+        const texts = ["Hello world", "How are you"];
+        const embeddings = model.encode(texts, true);
+
+        console.log("First 10 values:", embeddings.slice(0, 10));
+    }
+
+    run().catch(console.error);
+</script>
+</body>
+</html>
+
 ```
+
+**Output:**
+```
+First 10 values: Float32Array(10) [-0.034439802169799805, 0.03090989589691162, 0.006696964148432016, 0.02608015574514866, -0.03936990723013878, -0.16037224233150482, 0.06694218516349792, -0.006527911406010389, -0.04746570065617561, 0.014813981018960476, buffer: ArrayBuffer(40), byteLength: 40, byteOffset: 0, length: 10, Symbol(Symbol.toStringTag): 'Float32Array']
+```
+
+You can see the full example under `examples/basic.html` - to build run `scripts/wasm-build.sh` and go into `examples/` and run a local server, `npx serve` can serve wasm.
+

@@ -2,6 +2,7 @@ use crate::Config;
 use anyhow::Result;
 use ndarray::{Array1, Array2};
 use safetensors::SafeTensors;
+use std::path::Path;
 use std::collections::HashMap;
 
 pub struct ModelWeights {
@@ -11,8 +12,9 @@ pub struct ModelWeights {
 }
 
 impl ModelWeights {
-    pub fn load(path: &str) -> Result<Self> {
-        let data = std::fs::read(&format!("{}.safetensors", path))?;
+    pub fn load(path: &Path) -> Result<Self> {
+        let weights_file = path.join("model.safetensors");
+        let data = std::fs::read(weights_file)?;
         let tensors = SafeTensors::deserialize(&data)?;
 
         let mut tensor_data = HashMap::new();
@@ -31,7 +33,8 @@ impl ModelWeights {
         }
 
         // Load config
-        let config_str = std::fs::read_to_string(&format!("{}_config.json", path))?;
+        let config_file = path.join("config.json");
+        let config_str = std::fs::read_to_string(config_file)?;
         let config: Config = serde_json::from_str(&config_str)?;
 
         Ok(Self {

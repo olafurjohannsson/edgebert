@@ -16,15 +16,14 @@ serde_json = "1.0"
 anyhow = "1.0"
 safetensors = "0.4"
 wasm-bindgen = "0.2.100"
+reqwest = {  version = "0.12.23", features = ["blocking"] }
+
+
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-#openblas-src = { version = "0.10", features=["static"] }
-#ndarray = { version = "0.16.1", features=["rayon"] }
-#ndarray-linalg = { version = "0.17.0", features=["openblas-static"] }
 tokenizers = { version = "0.15", default-features = false, features = ["onig"] }
 rayon = "1.11.0"
-
-
+dirs = "6.0.0"
 ndarray = { version = "0.16", features = ["blas", "rayon", "matrixmultiply-threading"] }
 matrixmultiply = { version = "0.3", features = ["threading", "num_cpus", "cgemm"] }
 blas-src = { version = "0.10", features = ["openblas"] }
@@ -40,10 +39,12 @@ pkg-config = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2.100"
-wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["console"] }
+js-sys = "0.3.77"
+wasm-bindgen-futures = "0.4.50"
+web-sys = { version = "0.3.77", features = ["console"] }
 getrandom = { version = "0.2", features = ["js"] }
 ndarray = "0.16.1"
+futures = "0.3.31"
 console_error_panic_hook = "0.1.7"
 
 [profile.release]
@@ -60,9 +61,6 @@ inherits = "release"
 inherits = "dev"
 opt-level = 2
 
-[[bin]]
-path = "large_text_benchmark.rs"
-name = "large_text_benchmark"
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

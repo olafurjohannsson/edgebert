@@ -2,14 +2,22 @@
 extern crate blas_src;
 
 #[cfg(not(target_arch = "wasm32"))]
-use ndarray::parallel::prelude::*;
+use std::fs;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::{Path, PathBuf};
 
+#[cfg(not(target_arch = "wasm32"))]
+use dirs;
+
+#[cfg(not(target_arch = "wasm32"))]
+use reqwest;
 
 use anyhow::Result;
 use ndarray::{Array1, Array2, Array3, Array4, Axis, Zip, s};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
 mod tokenizer;
 mod weights;
 use weights::ModelWeights;
@@ -19,6 +27,11 @@ pub use tokenizer::WordPieceTokenizer as ModelTokenizer;
 
 #[cfg(not(target_arch = "wasm32"))]
 use tokenizers::Tokenizer as ModelTokenizer;
+
+#[derive(Debug, Clone, Copy)]
+pub enum ModelType {
+    MiniLML6V2,
+}
 
 #[wasm_bindgen]
 pub struct Model {
@@ -75,8 +88,6 @@ pub struct Config {
     pub layer_norm_eps: f32,
     pub hidden_act: String,
     pub model_type: String,
-    #[serde(default)]
-    pub type_vocab_size: usize,
 }
 
 impl Model {
@@ -158,34 +169,77 @@ impl Model {
             tokenizer,
         })
     }
-    pub fn from_pretrained(model_path: &str) -> Result<Self> {
-        let weights = ModelWeights::load(model_path)?;
-        let config = weights.config.clone();
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_pretrained(model_type: ModelType) -> Result<Self> {
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("edgebert");
 
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let tokenizer_file = &format!("{}_tokenizer.json", model_path);
-            let mut tokenizer = ModelTokenizer::from_file(tokenizer_file)
-                .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+        fs::create_dir_all(&cache_dir)?;
 
-            if let Some(padding) = tokenizer.get_padding_mut() {
-                padding.strategy = tokenizers::PaddingStrategy::BatchLongest;
-            }
-            if let Some(truncation) = tokenizer.get_truncation_mut() {
-                truncation.max_length = 512;
-            }
+        let model_path = match model_type {
+            ModelType::MiniLML6V2 => cache_dir.join("all-MiniLM-L6-v2"),
+        };
 
-            Self::from_weights(weights, tokenizer, config)
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let tokenizer_file = &format!("{}_tokenizer.json", model_path);
-            let tokenizer = ModelTokenizer::from_file(tokenizer_file)?;
-            Self::from_weights(weights, tokenizer, config)
-        }
+        Self::ensure_model_files(model_type, &model_path)?;
+        Self::from_pretrained_path(model_path.to_str().unwrap())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_pretrained_path(model_path: &str) -> Result<Self> {
+        let model_path = Path::new(model_path);
+
+        let weights = ModelWeights::load(model_path)?;
+        let tokenizer_file = model_path.join("tokenizer.json");
+        let config = weights.config.clone();
+
+        let mut tokenizer = ModelTokenizer::from_file(tokenizer_file)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+
+        if let Some(padding) = tokenizer.get_padding_mut() {
+            padding.strategy = tokenizers::PaddingStrategy::BatchLongest;
+        }
+        if let Some(truncation) = tokenizer.get_truncation_mut() {
+            truncation.max_length = 512;
+        }
+
+        Self::from_weights(weights, tokenizer, config)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ensure_model_files(model_id: ModelType, model_path: &Path) -> Result<()> {
+        let (weights_url, tokenizer_url, config_url, weights_file, tokenizer_file, config_file) =
+            match model_id {
+                ModelType::MiniLML6V2 => (
+                    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors",
+                    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+                    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json",
+                    model_path.join("model.safetensors"),
+                    model_path.join("tokenizer.json"),
+                    model_path.join("config.json"),
+                ),
+            };
+
+        fs::create_dir_all(model_path)?;
+
+        let download = |url: &str, path: &Path| -> anyhow::Result<()> {
+            if !path.exists() {
+                let resp = reqwest::blocking::get(url)?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("Failed to download {}: {}", url, resp.status());
+                }
+                let bytes = resp.bytes()?;
+                fs::write(path, &bytes)?;
+            }
+            Ok(())
+        };
+
+        download(weights_url, &weights_file)?;
+        download(tokenizer_url, &tokenizer_file)?;
+        download(config_url, &config_file)?;
+
+        Ok(())
+    }
     pub fn encode(&self, texts: Vec<&str>, normalize: bool) -> Result<Vec<Vec<f32>>> {
         #[cfg(target_arch = "wasm32")]
         let encodings = self.tokenizer.encode_batch(texts, 512)?;
@@ -555,7 +609,6 @@ fn mean_pool(hidden: &Array3<f32>, attention_mask: &Array2<f32>) -> Result<Array
     Ok(result)
 }
 
-
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub struct WasmModel {
@@ -570,7 +623,47 @@ pub fn init() {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+pub enum WasmModelType {
+    MiniLML6V2,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<WasmModelType> for ModelType {
+    fn from(wasm_type: WasmModelType) -> Self {
+        match wasm_type {
+            WasmModelType::MiniLML6V2 => ModelType::MiniLML6V2
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let resp = wasm_bindgen_futures::JsFuture::from(web_sys::window().unwrap().fetch_with_str(url))
+        .await
+        .map_err(|e| format!("Fetch error: {:?}", e))?;
+    let resp: web_sys::Response = resp.dyn_into().unwrap();
+    let array_buffer = wasm_bindgen_futures::JsFuture::from(resp.array_buffer().unwrap())
+        .await
+        .map_err(|e| format!("ArrayBuffer error: {:?}", e))?;
+    Ok(js_sys::Uint8Array::new(&array_buffer).to_vec())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_text(url: &str) -> Result<String, String> {
+    let resp = wasm_bindgen_futures::JsFuture::from(web_sys::window().unwrap().fetch_with_str(url))
+        .await
+        .map_err(|e| format!("Fetch error: {:?}", e))?;
+    let resp: web_sys::Response = resp.dyn_into().unwrap();
+    let text = wasm_bindgen_futures::JsFuture::from(resp.text().unwrap())
+        .await
+        .map_err(|e| format!("Text conversion error: {:?}", e))?;
+    Ok(text.as_string().unwrap())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
 impl WasmModel {
+
     #[wasm_bindgen(constructor)]
     pub fn new(
         weights_data: &[u8],
@@ -596,6 +689,31 @@ impl WasmModel {
 
         Ok(WasmModel { inner: model })
     }
+    #[wasm_bindgen]
+    pub async fn from_type(model_type: WasmModelType) -> Result<WasmModel, JsValue> {
+        let (weights_url, config_url, tokenizer_url) = match model_type {
+            WasmModelType::MiniLML6V2 => (
+                "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors",
+                "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json",
+                "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+            ),
+            // add more models here
+        };
+
+        let (weights, config, tokenizer) = futures::future::join3(
+            fetch_bytes(weights_url),
+            fetch_text(config_url),
+            fetch_text(tokenizer_url),
+        )
+            .await;
+
+        let weights = weights.map_err(|e| JsValue::from_str(&e))?;
+        let config = config.map_err(|e| JsValue::from_str(&e))?;
+        let tokenizer = tokenizer.map_err(|e| JsValue::from_str(&e))?;
+
+        let model = WasmModel::new(&weights, &config, &tokenizer)?;
+        Ok(model)
+    }
 
     #[wasm_bindgen]
     pub fn encode(&self, texts: Vec<String>, normalize: bool) -> Result<Vec<f32>, JsValue> {
@@ -610,4 +728,3 @@ impl WasmModel {
         Ok(vector)
     }
 }
-
