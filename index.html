@@ -1,14 +1,182 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8" />
-    <title>EdgeBERT WASM Demo</title>
+    <meta charset="UTF-8">
+    <title>EdgeBERT Embeddings Test</title>
+    <style>
+        body {
+            font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1e1e1e;
+            color: #d4d4d4;
+        }
+        h1 {
+            color: #569cd6;
+        }
+        .input-section {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        input {
+            flex: 1;
+            padding: 10px;
+            background: #2d2d30;
+            color: #d4d4d4;
+            border: 1px solid #3e3e42;
+            font-family: inherit;
+        }
+        button {
+            padding: 10px 20px;
+            background: #007acc;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover:not(:disabled) {
+            background: #005a9e;
+        }
+        button:disabled {
+            background: #3e3e42;
+            cursor: not-allowed;
+        }
+        .output {
+            background: #2d2d30;
+            padding: 15px;
+            border: 1px solid #3e3e42;
+            white-space: pre-wrap;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+    </style>
 </head>
 <body>
-<h1>EdgeBERT Web Demo</h1>
-<button id="run">Run Demo</button>
-<pre id="output"></pre>
+<h1>EdgeBERT Embeddings Test</h1>
 
-<script type="module" src="./index.js"></script>
+<div class="input-section">
+    <input type="text" id="text1" value="Hello world" placeholder="First text">
+    <input type="text" id="text2" value="How are you?" placeholder="Second text">
+</div>
+
+<button id="encode-btn" disabled>Loading model...</button>
+
+<div id="output" class="output"></div>
+
+<script type="module">
+    const EMBEDDING_SIZE = 384;
+    const worker = new Worker('worker.js', { type: 'module' });
+
+    const output = document.getElementById('output');
+    const encodeBtn = document.getElementById('encode-btn');
+
+    function cosineSim(a, b) {
+        const dot = a.reduce((sum, val, i) => sum + val * b[i], 0);
+        const normA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0));
+        const normB = Math.sqrt(b.reduce((sum, val) => sum + val * val, 0));
+        return dot / (normA * normB);
+    }
+
+    worker.onmessage = function(e) {
+        if (e.data.type === 'log') {
+            output.textContent += e.data.message + '\n';
+        } else if (e.data.type === 'ready') {
+            encodeBtn.textContent = 'Generate Embeddings';
+            encodeBtn.disabled = false;
+            output.textContent += 'Model loaded successfully!\n';
+        } else if (e.data.type === 'result') {
+            const flatEmbeddings = e.data.embeddings;
+            const text1 = document.getElementById('text1').value;
+            const text2 = document.getElementById('text2').value;
+
+            const embeddings = [];
+            for (let i = 0; i < 2; i++) {
+                const start = i * EMBEDDING_SIZE;
+                const end = start + EMBEDDING_SIZE;
+                embeddings.push(flatEmbeddings.slice(start, end));
+            }
+
+            output.textContent += `Embeddings shape: [${embeddings.length}, ${embeddings[0].length}]\n`;
+
+            // Cosine similarities
+            output.textContent += '\nCosine similarities:\n';
+            const sim = cosineSim(embeddings[0], embeddings[1]);
+            output.textContent += `'${text1}' vs '${text2}': ${sim.toFixed(3)}\n`;
+
+            // First embedding stats
+            const norm = Math.sqrt(embeddings[0].reduce((sum, val) => sum + val * val, 0));
+            output.textContent += `\nFirst embedding norm: ${norm.toFixed(6)}\n`;
+
+            const first10 = embeddings[0].slice(0, 10).map(v => v.toFixed(4));
+            output.textContent += `First 10 values: [${first10.join(', ')}]\n`;
+
+            // Normalized embeddings
+            output.textContent += '\n=== Normalized Embeddings ===\n';
+
+            const normalized = embeddings.map(emb => {
+                const norm = Math.sqrt(emb.reduce((sum, val) => sum + val * val, 0));
+                return emb.map(val => val / norm);
+            });
+
+            const normCheck = Math.sqrt(normalized[0].reduce((sum, val) => sum + val * val, 0));
+            output.textContent += `Normalized first embedding norm: ${normCheck.toFixed(6)} (should be ~1.0)\n`;
+
+            const first5Norm = normalized[0].slice(0, 5).map(v => v.toFixed(4));
+            output.textContent += `Normalized first 5 values: [${first5Norm.join(', ')}]\n`;
+
+            output.textContent += '\nCosine similarities (normalized):\n';
+            const simNorm = normalized[0].reduce((sum, val, i) => sum + val * normalized[1][i], 0);
+            output.textContent += `'${text1}' vs '${text2}': ${simNorm.toFixed(3)}\n`;
+
+            encodeBtn.disabled = false;
+            encodeBtn.textContent = 'Generate Embeddings';
+        } else if (e.data.type === 'error') {
+            output.textContent += `Error: ${e.data.error}\n`;
+            encodeBtn.disabled = false;
+        }
+    };
+
+    encodeBtn.addEventListener('click', () => {
+        const text1 = document.getElementById('text1').value;
+        const text2 = document.getElementById('text2').value;
+
+        output.textContent = '=== Regular Embeddings ===\n';
+        output.textContent += `Encoding texts: ["${text1}", "${text2}"]\n`;
+
+        encodeBtn.disabled = true;
+        encodeBtn.textContent = 'Processing...';
+
+        worker.postMessage({
+            type: 'encode',
+            texts: [text1, text2]
+        });
+    });
+
+    // Initialize model
+    async function init() {
+        output.textContent = 'Loading model files...\n';
+
+        try {
+            const [weights, config, tokenizer] = await Promise.all([
+                fetch('minilm-l6-v2.safetensors').then(r => r.arrayBuffer()),
+                fetch('minilm-l6-v2_config.json').then(r => r.text()),
+                fetch('minilm-l6-v2_tokenizer.json').then(r => r.text())
+            ]);
+
+            output.textContent += 'Sending to worker...\n';
+            worker.postMessage({
+                type: 'init',
+                weights,
+                config,
+                tokenizer
+            });
+        } catch (error) {
+            output.textContent += `Failed to load files: ${error.message}\n`;
+        }
+    }
+
+    init();
+</script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ndarray::{Zip, Array1, Array2, Array3, Array4, Axis, s, ArrayView3};
+use ndarray::{Array1, Array2, Array3, Array4, ArrayView3, Axis, Zip, s};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 mod tokenizer;
@@ -72,13 +72,19 @@ pub struct Config {
     pub type_vocab_size: usize,
 }
 
-// #[wasm_bindgen]
+
 impl Model {
-    pub fn from_weights(weights: ModelWeights, tokenizer: ModelTokenizer, config: Config) -> Result<Self> {
+
+    pub fn from_weights(
+        weights: ModelWeights,
+        tokenizer: ModelTokenizer,
+        config: Config,
+    ) -> Result<Self> {
         // Load embeddings
         let word_embeddings = weights.get_array2("embeddings.word_embeddings.weight")?;
         let position_embeddings = weights.get_array2("embeddings.position_embeddings.weight")?;
-        let token_type_embeddings = weights.get_array2("embeddings.token_type_embeddings.weight")?;
+        let token_type_embeddings =
+            weights.get_array2("embeddings.token_type_embeddings.weight")?;
 
         // Load layers
         let mut layers = Vec::new();
@@ -86,27 +92,33 @@ impl Model {
             let prefix = format!("encoder.layer.{}", i);
 
             let attention = MultiHeadAttention {
-                query_weight: weights.get_array2(&format!("{}.attention.self.query.weight", prefix))?,
+                query_weight: weights
+                    .get_array2(&format!("{}.attention.self.query.weight", prefix))?,
                 query_bias: weights.get_array1(&format!("{}.attention.self.query.bias", prefix))?,
                 key_weight: weights.get_array2(&format!("{}.attention.self.key.weight", prefix))?,
                 key_bias: weights.get_array1(&format!("{}.attention.self.key.bias", prefix))?,
-                value_weight: weights.get_array2(&format!("{}.attention.self.value.weight", prefix))?,
+                value_weight: weights
+                    .get_array2(&format!("{}.attention.self.value.weight", prefix))?,
                 value_bias: weights.get_array1(&format!("{}.attention.self.value.bias", prefix))?,
-                output_weight: weights.get_array2(&format!("{}.attention.output.dense.weight", prefix))?,
-                output_bias: weights.get_array1(&format!("{}.attention.output.dense.bias", prefix))?,
+                output_weight: weights
+                    .get_array2(&format!("{}.attention.output.dense.weight", prefix))?,
+                output_bias: weights
+                    .get_array1(&format!("{}.attention.output.dense.bias", prefix))?,
                 num_heads: config.num_attention_heads,
                 head_dim: config.hidden_size / config.num_attention_heads,
             };
 
             let intermediate = FeedForward {
-                dense1_weight: weights.get_array2(&format!("{}.intermediate.dense.weight", prefix))?,
+                dense1_weight: weights
+                    .get_array2(&format!("{}.intermediate.dense.weight", prefix))?,
                 dense1_bias: weights.get_array1(&format!("{}.intermediate.dense.bias", prefix))?,
                 dense2_weight: weights.get_array2(&format!("{}.output.dense.weight", prefix))?,
                 dense2_bias: weights.get_array1(&format!("{}.output.dense.bias", prefix))?,
             };
 
             let layer_norm1 = LayerNorm {
-                weight: weights.get_array1(&format!("{}.attention.output.LayerNorm.weight", prefix))?,
+                weight: weights
+                    .get_array1(&format!("{}.attention.output.LayerNorm.weight", prefix))?,
                 bias: weights.get_array1(&format!("{}.attention.output.LayerNorm.bias", prefix))?,
                 eps: config.layer_norm_eps,
             };
@@ -166,7 +178,6 @@ impl Model {
             let tokenizer_file = &format!("{}_tokenizer.json", model_path);
             let tokenizer = ModelTokenizer::from_file(tokenizer_file)?;
             Self::from_weights(weights, tokenizer, config)
-
         }
     }
 
@@ -368,7 +379,11 @@ impl FeedForward {
 fn matmul_3d_2d(a: &Array3<f32>, b: &Array2<f32>) -> Array3<f32> {
     let (batch, m, k) = a.dim();
     let n = b.shape()[1];
-    assert_eq!(k, b.shape()[0], "Matrix dimensions are incompatible for multiplication");
+    assert_eq!(
+        k,
+        b.shape()[0],
+        "Matrix dimensions are incompatible for multiplication"
+    );
 
     let a_cont = a.as_standard_layout();
     let b_cont = b.as_standard_layout();
@@ -441,8 +456,14 @@ fn matmul_4d_fixed(a: &Array4<f32>, b: &Array4<f32>) -> Array4<f32> {
 
     let a_cont = a.as_standard_layout();
     let b_cont = b.as_standard_layout();
-    let a_3d = a_cont.view().into_shape_with_order((batch * heads, seq1, dim)).unwrap();
-    let b_3d = b_cont.view().into_shape_with_order((batch * heads, dim, seq2)).unwrap();
+    let a_3d = a_cont
+        .view()
+        .into_shape_with_order((batch * heads, seq1, dim))
+        .unwrap();
+    let b_3d = b_cont
+        .view()
+        .into_shape_with_order((batch * heads, dim, seq2))
+        .unwrap();
 
     // 3d output
     let mut c_3d = Array3::<f32>::zeros((batch * heads, seq1, seq2));
@@ -458,7 +479,8 @@ fn matmul_4d_fixed(a: &Array4<f32>, b: &Array4<f32>) -> Array4<f32> {
         });
 
     // reshape 3d into 4d
-    c_3d.into_shape_with_order((batch, heads, seq1, seq2)).unwrap()
+    c_3d.into_shape_with_order((batch, heads, seq1, seq2))
+        .unwrap()
 }
 
 fn gelu(x: &Array3<f32>) -> Array3<f32> {
@@ -520,17 +542,27 @@ fn mean_pool(hidden: &Array3<f32>, attention_mask: &Array2<f32>) -> Result<Array
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub struct WasmModel {
     inner: Model,
 }
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+pub fn init() {
+    console_error_panic_hook::set_once();
+}
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 impl WasmModel {
     #[wasm_bindgen(constructor)]
-    pub fn new(weights_data: &[u8], config_json: &str, tokenizer_json: &str) -> Result<WasmModel, JsValue> {
+    pub fn new(
+        weights_data: &[u8],
+        config_json: &str,
+        tokenizer_json: &str,
+    ) -> Result<WasmModel, JsValue> {
         use crate::tokenizer::WordPieceTokenizer;
 
         // Parse weights from bytes
@@ -542,8 +574,8 @@ impl WasmModel {
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         // Parse config
-        let config = serde_json::from_str(config_json)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let config =
+            serde_json::from_str(config_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         let model = Model::from_weights(weights, tokenizer, config)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -552,13 +584,24 @@ impl WasmModel {
     }
 
     #[wasm_bindgen]
+    pub fn encode_normalized(&self, texts: Vec<String>) -> Result<Vec<f32>, JsValue> {
+        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        let embeddings = self
+            .inner
+            .encode_normalized(text_refs)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        Ok(embeddings.into_iter().flatten().collect())
+    }
+    #[wasm_bindgen]
     pub fn encode(&self, texts: Vec<String>) -> Result<Vec<f32>, JsValue> {
         let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-        let embeddings = self.inner.encode(text_refs)
+        let embeddings = self
+            .inner
+            .encode(text_refs)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         // Flatten for JS
         Ok(embeddings.into_iter().flatten().collect())
     }
 }
-

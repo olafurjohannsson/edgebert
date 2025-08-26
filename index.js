@@ -14,15 +14,44 @@ function cosineSim(a, b) {
 async function runDemo() {
     const output = document.getElementById("output");
 
-    await init(); // load WASM
-    console.log(WasmModel)
-    const model = await WasmModel.from_pretrained("minilm-l6-v2");
+    // Initialize WASM module
+    await init();
 
+    // Load model files
+    const weights = await fetch('minilm-l6-v2.safetensors').then(r => r.arrayBuffer());
+    const config = await fetch('minilm-l6-v2_config.json').then(r => r.text());
+    const tokenizer = await fetch('minilm-l6-v2_tokenizer.json').then(r => r.text());
+
+
+    // Create model
+    const model = new WasmModel(
+        new Uint8Array(weights),
+        config,
+        tokenizer
+    );
+    console.log('creating mode', model)
+
+    // Use the model
     const texts = ["Hello world", "How are you?"];
+    console.log(texts)
+    const embeddings = model.encode(texts);
+
+    // embeddings is a flat Float32Array, reshape as needed
+    const embeddingSize = 384; // for minilm-l6-v2
+    const numTexts = texts.length;
+
+    for (let i = 0; i < numTexts; i++) {
+        const start = i * embeddingSize;
+        const end = start + embeddingSize;
+        const embedding = embeddings.slice(start, end);
+        console.log(`Embedding for "${texts[i]}":`, embedding);
+    }
+
+
     output.textContent += "Encoding: " + JSON.stringify(texts) + "\n\n";
 
     // Regular embeddings
-    const embeddings = await model.encode(texts);
+
     const sim = cosineSim(embeddings[0], embeddings[1]);
     output.textContent += `Cosine similarity: ${sim.toFixed(3)}\n\n`;
 
