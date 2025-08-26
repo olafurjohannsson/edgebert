@@ -1,13 +1,15 @@
+use wasm_bindgen::prelude::*;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::Path;
-use wasm_bindgen::prelude::*;
+
+#[cfg(target_arch = "wasm32")]
+pub use self::wasm::WordPieceTokenizer;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use super::*;
 
-    #[wasm_bindgen]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Encoding {
         pub ids: Vec<u32>,
@@ -39,11 +41,6 @@ mod wasm {
     }
 
     impl WordPieceTokenizer {
-        pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-            let content = std::fs::read_to_string(path)?;
-            Self::from_json_str(&content)
-        }
-
         /// Creates a new tokenizer
         pub fn from_json_str(content: &str) -> Result<Self> {
             let json: Value = serde_json::from_str(content)?;
@@ -88,7 +85,10 @@ mod wasm {
                 pad_token_id,
             })
         }
-
+        pub fn from_file(path: &str) -> Result<Self> {
+            let content = std::fs::read_to_string(path)?;
+            Self::from_json_str(&content)
+        }
         /// Tokenizes a word using WordPiece
         fn tokenize_word(&self, word: &str) -> Vec<u32> {
             if let Some(id) = self.vocab.get(word) {
@@ -122,7 +122,31 @@ mod wasm {
             }
             sub_tokens
         }
+        fn pre_tokenize(text: &str) -> Vec<String> {
+            let mut tokens = Vec::new();
+            let mut current = String::new();
 
+            for ch in text.chars() {
+                if ch.is_whitespace() {
+                    if !current.is_empty() {
+                        tokens.push(current.clone());
+                        current.clear();
+                    }
+                } else if ch.is_ascii_punctuation() {
+                    if !current.is_empty() {
+                        tokens.push(current.clone());
+                        current.clear();
+                    }
+                    tokens.push(ch.to_string());
+                } else {
+                    current.push(ch.to_lowercase().next().unwrap());
+                }
+            }
+            if !current.is_empty() {
+                tokens.push(current);
+            }
+            tokens
+        }
         /// Encodes a string
         pub fn encode(&self, text: &str, max_len: usize) -> Result<Encoding> {
             let mut ids = vec![self.cls_token_id];

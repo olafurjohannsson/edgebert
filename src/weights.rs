@@ -64,4 +64,32 @@ impl ModelWeights {
         Array2::from_shape_vec((shape[0], shape[1]), data.clone())
             .map_err(|e| anyhow::anyhow!("Shape error: {}", e))
     }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_bytes(data: &[u8], config_json: &str) -> Result<Self> {
+        let tensors = SafeTensors::deserialize(data)?;
+
+        let mut tensor_data = HashMap::new();
+        let mut shapes = HashMap::new();
+
+        for (name, view) in tensors.tensors() {
+            let shape = view.shape().to_vec();
+            let data: Vec<f32> = view
+                .data()
+                .chunks(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+
+            shapes.insert(name.to_string(), shape);
+            tensor_data.insert(name.to_string(), data);
+        }
+
+        let config: Config = serde_json::from_str(config_json)?;
+
+        Ok(Self {
+            tensors: tensor_data,
+            shapes,
+            config,
+        })
+    }
 }

@@ -57,3 +57,6 @@ opt-level = 2
 [[bin]]
 path = "large_text_benchmark.rs"
 name = "large_text_benchmark"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
