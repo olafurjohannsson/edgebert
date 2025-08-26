@@ -1,44 +1,17 @@
+#[cfg(not(target_arch = "wasm32"))]
 extern crate blas_src;
 
-use std::sync::Once;
+#[cfg(not(target_arch = "wasm32"))]
+use ndarray::parallel::prelude::*;
 
-static INIT: Once = Once::new();
 
-pub fn initialize_matmul_threads() {
-    println!("initialize_matmul_threads");
-    INIT.call_once(|| {
-        // Only set if not already set by user
-        if std::env::var("MATMUL_NUM_THREADS").is_err() {
-            // let num_threads = num_cpus::get_physical().to_string();
-            unsafe {
-                std::env::set_var("MATMUL_NUM_THREADS", "8".to_string());
-            }
-        }
-
-        if std::env::var("OMP_NUM_THREADS").is_err() {
-            // let num_threads = num_cpus::get_physical().to_string();
-            unsafe {
-                std::env::set_var("OMP_NUM_THREADS", "8".to_string());
-            }
-        }
-
-        if std::env::var("OPENBLAS_NUM_THREADS").is_err() {
-            // let num_threads = num_cpus::get_physical().to_string();
-            unsafe {
-                std::env::set_var("OPENBLAS_NUM_THREADS", "8".to_string());
-            }
-        }
-    });
-}
 
 use anyhow::Result;
-use ndarray::parallel::prelude::*;
-use ndarray::{Array1, Array2, Array3, Array4, ArrayView3, Axis, Zip, s};
+use ndarray::{Array1, Array2, Array3, Array4, Axis, Zip, s};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 mod tokenizer;
 mod weights;
-use matrixmultiply::sgemm;
 use weights::ModelWeights;
 
 #[cfg(target_arch = "wasm32")]
@@ -112,7 +85,6 @@ impl Model {
         tokenizer: ModelTokenizer,
         config: Config,
     ) -> Result<Self> {
-        initialize_matmul_threads();
         // Load embeddings
         let word_embeddings = weights.get_array2("embeddings.word_embeddings.weight")?;
         let position_embeddings = weights.get_array2("embeddings.position_embeddings.weight")?;
@@ -583,8 +555,6 @@ fn mean_pool(hidden: &Array3<f32>, attention_mask: &Array2<f32>) -> Result<Array
     Ok(result)
 }
 
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -632,20 +602,12 @@ impl WasmModel {
         let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let embeddings = self
             .inner
-            .encode(text_refs)
+            .encode(text_refs, normalize)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        let vector = embeddings.into_iter().flatten().collect();
-        if normalize {
-            let text_refs: Vec<&str> = vector.iter().map(|s| s.as_str()).collect();
-            let embeddings = self
-                .inner
-                .encode(text_refs)
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let vector: Vec<f32> = embeddings.into_iter().flatten().collect();
 
-            Ok(embeddings.into_iter().flatten().collect())
-        } else {
-            Ok(vector)
-        }
+        Ok(vector)
     }
 }
+

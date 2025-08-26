@@ -1,4 +1,3 @@
-use wasm_bindgen::prelude::*;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -33,7 +32,6 @@ mod wasm {
     /// A lightweight, WASM-compatible that implements the WordPiece algorithm.
     pub struct WordPieceTokenizer {
         vocab: HashMap<String, u32>,
-        unk_token: String,
         unk_token_id: u32,
         cls_token_id: u32,
         sep_token_id: u32,
@@ -74,11 +72,10 @@ mod wasm {
             let (_, cls_token_id) = get_token_info("[CLS]", &json)?;
             let (_, sep_token_id) = get_token_info("[SEP]", &json)?;
             let (_, pad_token_id) = get_token_info("[PAD]", &json)?;
-            let (unk_token, unk_token_id) = get_token_info("[UNK]", &json)?;
+            let (_, unk_token_id) = get_token_info("[UNK]", &json)?;
 
             Ok(Self {
                 vocab,
-                unk_token,
                 unk_token_id,
                 cls_token_id,
                 sep_token_id,
@@ -122,31 +119,7 @@ mod wasm {
             }
             sub_tokens
         }
-        fn pre_tokenize(text: &str) -> Vec<String> {
-            let mut tokens = Vec::new();
-            let mut current = String::new();
 
-            for ch in text.chars() {
-                if ch.is_whitespace() {
-                    if !current.is_empty() {
-                        tokens.push(current.clone());
-                        current.clear();
-                    }
-                } else if ch.is_ascii_punctuation() {
-                    if !current.is_empty() {
-                        tokens.push(current.clone());
-                        current.clear();
-                    }
-                    tokens.push(ch.to_string());
-                } else {
-                    current.push(ch.to_lowercase().next().unwrap());
-                }
-            }
-            if !current.is_empty() {
-                tokens.push(current);
-            }
-            tokens
-        }
         /// Encodes a string
         pub fn encode(&self, text: &str, max_len: usize) -> Result<Encoding> {
             let mut ids = vec![self.cls_token_id];
