@@ -35,11 +35,12 @@ For server-side or desktop applications, you can use the library directly.
 [dependencies]
 edgebert = "0.1.0" # Replace with the actual version
 anyhow = "1.0"
-
+```
 
 ###
 
 ```rust
+
 use edgebert::Model;
 
 fn main() -> anyhow::Result<()> {
@@ -52,6 +53,7 @@ fn main() -> anyhow::Result<()> {
 ```
 
 ```javascript
+
 import init, { WasmModel } from "./pkg/edgebert.js";
 
 async function runDemo() {
