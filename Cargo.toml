@@ -18,11 +18,17 @@ safetensors = "0.4"
 wasm-bindgen = "0.2.100"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-openblas-src = { version = "0.10", features=["static"] }
-ndarray = { version = "0.16.1", features=["rayon"] }
-ndarray-linalg = { version = "0.17.0", features=["openblas-static"] }
+#openblas-src = { version = "0.10", features=["static"] }
+#ndarray = { version = "0.16.1", features=["rayon"] }
+#ndarray-linalg = { version = "0.17.0", features=["openblas-static"] }
 tokenizers = { version = "0.15", default-features = false, features = ["onig"] }
 rayon = "1.11.0"
+
+
+ndarray = { version = "0.16", features = ["blas", "rayon", "matrixmultiply-threading"] }
+matrixmultiply = { version = "0.3", features = ["threading", "num_cpus", "cgemm"] }
+blas-src = { version = "0.10", features = ["openblas"] }
+openblas-src = { version = "0.10", features = ["cblas", "system"] }
 
 [lib]
 crate-type = ["cdylib", "rlib"] 

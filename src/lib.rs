@@ -1,10 +1,44 @@
+extern crate blas_src;
+
+use std::sync::Once;
+
+static INIT: Once = Once::new();
+
+pub fn initialize_matmul_threads() {
+    println!("initialize_matmul_threads");
+    INIT.call_once(|| {
+        // Only set if not already set by user
+        if std::env::var("MATMUL_NUM_THREADS").is_err() {
+            // let num_threads = num_cpus::get_physical().to_string();
+            unsafe {
+                std::env::set_var("MATMUL_NUM_THREADS", "8".to_string());
+            }
+        }
+
+        if std::env::var("OMP_NUM_THREADS").is_err() {
+            // let num_threads = num_cpus::get_physical().to_string();
+            unsafe {
+                std::env::set_var("OMP_NUM_THREADS", "8".to_string());
+            }
+        }
+
+        if std::env::var("OPENBLAS_NUM_THREADS").is_err() {
+            // let num_threads = num_cpus::get_physical().to_string();
+            unsafe {
+                std::env::set_var("OPENBLAS_NUM_THREADS", "8".to_string());
+            }
+        }
+    });
+}
+
 use anyhow::Result;
+use ndarray::parallel::prelude::*;
 use ndarray::{Array1, Array2, Array3, Array4, ArrayView3, Axis, Zip, s};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 mod tokenizer;
 mod weights;
-
+use matrixmultiply::sgemm;
 use weights::ModelWeights;
 
 #[cfg(target_arch = "wasm32")]
@@ -72,14 +106,13 @@ pub struct Config {
     pub type_vocab_size: usize,
 }
 
-
 impl Model {
-
     pub fn from_weights(
         weights: ModelWeights,
         tokenizer: ModelTokenizer,
         config: Config,
     ) -> Result<Self> {
+        initialize_matmul_threads();
         // Load embeddings
         let word_embeddings = weights.get_array2("embeddings.word_embeddings.weight")?;
         let position_embeddings = weights.get_array2("embeddings.position_embeddings.weight")?;
@@ -181,7 +214,7 @@ impl Model {
         }
     }
 
-    pub fn encode(&self, texts: Vec<&str>) -> Result<Vec<Vec<f32>>> {
+    pub fn encode(&self, texts: Vec<&str>, normalize: bool) -> Result<Vec<Vec<f32>>> {
         #[cfg(target_arch = "wasm32")]
         let encodings = self.tokenizer.encode_batch(texts, 512)?;
 
@@ -214,19 +247,19 @@ impl Model {
         }
 
         let embeddings = self.forward(&input_ids, &attention_mask)?;
+        let vector: Vec<Vec<f32>> = embeddings.outer_iter().map(|row| row.to_vec()).collect();
 
-        Ok(embeddings.outer_iter().map(|row| row.to_vec()).collect())
-    }
-
-    pub fn encode_normalized(&self, texts: Vec<&str>) -> Result<Vec<Vec<f32>>> {
-        let embeddings = self.encode(texts)?;
-        Ok(embeddings
-            .into_iter()
-            .map(|emb| {
-                let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
-                emb.into_iter().map(|x| x / norm.max(1e-12)).collect()
-            })
-            .collect())
+        if normalize {
+            Ok(vector
+                .into_iter()
+                .map(|emb| {
+                    let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    emb.into_iter().map(|x| x / norm.max(1e-12)).collect()
+                })
+                .collect())
+        } else {
+            Ok(vector)
+        }
     }
 
     fn forward(
@@ -402,35 +435,20 @@ fn matmul_3d_2d(a: &Array3<f32>, b: &Array2<f32>) -> Array3<f32> {
 
 // todo: vectorize
 fn softmax_4d_fixed(scores: &Array4<f32>) -> Array4<f32> {
-    let mut result = scores.clone();
-    let (batch, heads, seq1, seq2) = result.dim();
+    // Subtract max for numerical stability
+    let max_along_axis = scores.fold_axis(Axis(3), f32::NEG_INFINITY, |&acc, &elem| acc.max(elem));
+    let max_expanded = max_along_axis.insert_axis(Axis(3));
+    let stable_scores = scores - max_expanded;
 
-    for b in 0..batch {
-        for h in 0..heads {
-            for s1 in 0..seq1 {
-                // Find max
-                let mut max = f32::NEG_INFINITY;
-                for s2 in 0..seq2 {
-                    max = max.max(result[[b, h, s1, s2]]);
-                }
+    // Exponentiate
+    let exp_scores = stable_scores.mapv(|x| x.exp());
 
-                // Exp and sum
-                let mut sum = 0.0;
-                for s2 in 0..seq2 {
-                    result[[b, h, s1, s2]] = (result[[b, h, s1, s2]] - max).exp();
-                    sum += result[[b, h, s1, s2]];
-                }
-                // Clamp
-                sum = sum.max(1e-9);
+    // Sum along the axis
+    let sum_exp = exp_scores.sum_axis(Axis(3));
+    let sum_exp_expanded = sum_exp.insert_axis(Axis(3)).mapv(|x| x.max(1e-9));
 
-                // Normalize
-                for s2 in 0..seq2 {
-                    result[[b, h, s1, s2]] /= sum;
-                }
-            }
-        }
-    }
-    result
+    // Normalize
+    &exp_scores / sum_exp_expanded
 }
 fn apply_attention_mask_4d(mut scores: Array4<f32>, mask: &Array2<f32>) -> Array4<f32> {
     let scores_shape = scores.dim();
@@ -449,37 +467,63 @@ fn apply_attention_mask_4d(mut scores: Array4<f32>, mask: &Array2<f32>) -> Array
 
     scores
 }
+
 fn matmul_4d_fixed(a: &Array4<f32>, b: &Array4<f32>) -> Array4<f32> {
-    // 1. Get original dimensions
+    assert_eq!(a.shape()[0], b.shape()[0], "Batch size mismatch");
+    assert_eq!(a.shape()[1], b.shape()[1], "Heads mismatch");
+    assert_eq!(a.shape()[3], b.shape()[2], "Dimension mismatch");
+
     let (batch, heads, seq1, dim) = a.dim();
     let seq2 = b.shape()[3];
 
     let a_cont = a.as_standard_layout();
     let b_cont = b.as_standard_layout();
+
     let a_3d = a_cont
         .view()
         .into_shape_with_order((batch * heads, seq1, dim))
-        .unwrap();
+        .expect("Could not reshape A into 3D");
     let b_3d = b_cont
         .view()
         .into_shape_with_order((batch * heads, dim, seq2))
-        .unwrap();
+        .expect("Could not reshape B into 3D");
 
-    // 3d output
-    let mut c_3d = Array3::<f32>::zeros((batch * heads, seq1, seq2));
+    let total_batches = batch * heads;
+    let mut output_3d = Array3::<f32>::zeros((total_batches, seq1, seq2));
 
-    // batch matrix mul
-    Zip::from(c_3d.axis_iter_mut(Axis(0)))
-        .and(a_3d.axis_iter(Axis(0)))
-        .and(b_3d.axis_iter(Axis(0)))
-        .for_each(|mut c_slice, a_slice, b_slice| {
-            // possibly use BLAS
-            let result = a_slice.dot(&b_slice);
-            c_slice.assign(&result);
-        });
+    #[cfg(all(not(target_arch = "wasm32")))]
+    {
+        if total_batches <= 8 {
+            Zip::from(output_3d.axis_iter_mut(Axis(0)))
+                .and(a_3d.axis_iter(Axis(0)))
+                .and(b_3d.axis_iter(Axis(0)))
+                .for_each(|mut c_slice, a_slice, b_slice| {
+                    let result = a_slice.dot(&b_slice);
+                    c_slice.assign(&result);
+                });
+        } else {
+            Zip::from(output_3d.axis_iter_mut(Axis(0)))
+                .and(a_3d.axis_iter(Axis(0)))
+                .and(b_3d.axis_iter(Axis(0)))
+                .par_for_each(|mut c_slice, a_slice, b_slice| {
+                    let result = a_slice.dot(&b_slice);
+                    c_slice.assign(&result);
+                });
+        }
+    }
+    #[cfg(any(target_arch = "wasm32"))]
+    {
+        Zip::from(output_3d.axis_iter_mut(Axis(0)))
+            .and(a_3d.axis_iter(Axis(0)))
+            .and(b_3d.axis_iter(Axis(0)))
+            .for_each(|mut c_slice, a_slice, b_slice| {
+                let result = a_slice.dot(&b_slice);
+                c_slice.assign(&result);
+            });
+    }
 
-    // reshape 3d into 4d
-    c_3d.into_shape_with_order((batch, heads, seq1, seq2))
+    output_3d
+        .into_shape_with_order((batch, heads, seq1, seq2))
         .unwrap()
 }
 
@@ -584,24 +628,24 @@ impl WasmModel {
     }
 
     #[wasm_bindgen]
-    pub fn encode_normalized(&self, texts: Vec<String>) -> Result<Vec<f32>, JsValue> {
-        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-        let embeddings = self
-            .inner
-            .encode_normalized(text_refs)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-        Ok(embeddings.into_iter().flatten().collect())
-    }
-    #[wasm_bindgen]
-    pub fn encode(&self, texts: Vec<String>) -> Result<Vec<f32>, JsValue> {
+    pub fn encode(&self, texts: Vec<String>, normalize: bool) -> Result<Vec<f32>, JsValue> {
         let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let embeddings = self
             .inner
             .encode(text_refs)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        // Flatten for JS
-        Ok(embeddings.into_iter().flatten().collect())
+        let vector = embeddings.into_iter().flatten().collect();
+        if normalize {
+            let text_refs: Vec<&str> = vector.iter().map(|s| s.as_str()).collect();
+            let embeddings = self
+                .inner
+                .encode(text_refs)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            Ok(embeddings.into_iter().flatten().collect())
+        } else {
+            Ok(vector)
+        }
     }
 }

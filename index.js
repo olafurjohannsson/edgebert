@@ -56,7 +56,7 @@ async function runDemo() {
     output.textContent += `Cosine similarity: ${sim.toFixed(3)}\n\n`;
 
     // Normalized embeddings (cosine = dot product)
-    const normEmb = await model.encode_normalized(texts);
+    const normEmb = await model.encode(texts, true);
     let dot = 0;
     for (let i = 0; i < normEmb[0].length; i++) {
         dot += normEmb[0][i] * normEmb[1][i];

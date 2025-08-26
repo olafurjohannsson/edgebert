@@ -20,7 +20,7 @@ fn main() -> Result<()> {
     // Test regular embeddings
     println!("=== Regular Embeddings ===");
     println!("Encoding texts: {:?}", texts);
-    let embeddings = vectorizer.encode(texts.clone())?;
+    let embeddings = vectorizer.encode(texts.clone(), true)?;
     println!("Embeddings shape: [{}, {}]", embeddings.len(), embeddings[0].len());
 
     println!("\nCosine similarities:");
@@ -38,7 +38,7 @@ fn main() -> Result<()> {
 
     // Test normalized embeddings
     println!("\n=== Normalized Embeddings ===");
-    let normalized_embeddings = vectorizer.encode_normalized(texts.clone())?;
+    let normalized_embeddings = vectorizer.encode(texts.clone(), true)?;
 
     let norm_check = normalized_embeddings[0].iter().map(|x| x * x).sum::<f32>().sqrt();
     println!("Normalized first embedding norm: {:.6} (should be ~1.0)", norm_check);

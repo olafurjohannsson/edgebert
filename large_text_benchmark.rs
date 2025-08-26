@@ -90,7 +90,7 @@ fn benchmark_batch(vectorizer: &Model, texts: &[String], batch_size: usize) -> R
         let texts_refs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
 
         let batch_start = Instant::now();
-        let embeddings = vectorizer.encode(texts_refs)?;
+        let embeddings = vectorizer.encode(texts_refs, true)?;
         let batch_time = batch_start.elapsed();
 
        tokenization_time += batch_time * 3 / 10;
@@ -145,11 +145,11 @@ fn main() -> Result<()> {
     // Warm up the position embedding cache
     for batch_size in [1, 8, 32, 64, 128] {
         let dummy = vec!["warm up"; batch_size];
-        let _ = vectorizer.encode(dummy)?;
+        let _ = vectorizer.encode(dummy, true)?;
     }
     let warmup_texts = generate_test_texts(10);
     let warmup_refs: Vec<&str> = warmup_texts.iter().map(|s| s.as_str()).collect();
-    let _ = vectorizer.encode(warmup_refs)?;
+    let _ = vectorizer.encode(warmup_refs, true)?;
 
     println!("Warm-up complete\n");
 
@@ -185,7 +185,7 @@ fn main() -> Result<()> {
         println!("{:5} texts: Batch {:3} = {:6.1} texts/sec ({:.2}ms/text)",
                  num_texts, best.batch_size, best.throughput, best.avg_time_per_text * 1000.0);
     }
-    
+
 
     if let Some(largest) = results.iter().filter(|r| r.total_texts == 10000).max_by_key(|r| r.batch_size) {
         largest.print_summary();
