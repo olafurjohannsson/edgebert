@@ -1,16 +1,16 @@
-import init, { WasmModel } from './pkg/edgebert.js';
+import init, { WasmModel, WasmModelType } from './pkg/edgebert.js';
 
 let model = null;
 
-self.onmessage = async function(e) {
+self.onmessage = async function (e) {
     if (e.data.type === 'init') {
         try {
             self.postMessage({ type: 'log', message: 'Initializing WASM...' });
             await init();
 
-            self.postMessage({ type: 'log', message: 'Creating model...' });
-            const { weights, config, tokenizer } = e.data;
-            model = new WasmModel(new Uint8Array(weights), config, tokenizer);
+            self.postMessage({ type: 'log', message: 'Loading model...' });
+
+            model = await WasmModel.from_type(WasmModelType.MiniLML6V2);
 
             self.postMessage({ type: 'ready' });
         } catch (error) {
@@ -23,10 +23,10 @@ self.onmessage = async function(e) {
         }
 
         try {
-            const embeddings = model.encode(e.data.texts);
+            const embeddings = model.encode(e.data.texts, true);
             self.postMessage({
                 type: 'result',
-                embeddings: Array.from(embeddings)
+                embeddings: Array.from(embeddings),
             });
         } catch (error) {
             self.postMessage({ type: 'error', error: error.message });

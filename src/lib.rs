@@ -637,27 +637,65 @@ impl From<WasmModelType> for ModelType {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let resp = wasm_bindgen_futures::JsFuture::from(web_sys::window().unwrap().fetch_with_str(url))
-        .await
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::JsFuture;
+#[cfg(target_arch = "wasm32")]
+use web_sys::{Response, Window, WorkerGlobalScope};
+
+#[cfg(target_arch = "wasm32")]
+fn get_global() -> Result<Global, String> {
+    let g = js_sys::global();
+
+    if let Ok(win) = g.clone().dyn_into::<Window>() {
+        Ok(Global::Window(win))
+    } else if let Ok(worker) = g.clone().dyn_into::<WorkerGlobalScope>() {
+        Ok(Global::Worker(worker))
+    } else {
+        Err("Unknown global scope".to_string())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+enum Global {
+    Window(Window),
+    Worker(WorkerGlobalScope),
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let global = get_global()?;
+
+    let resp_js = match global {
+        Global::Window(win) => JsFuture::from(win.fetch_with_str(url)).await,
+        Global::Worker(worker) => JsFuture::from(worker.fetch_with_str(url)).await,
+    }
         .map_err(|e| format!("Fetch error: {:?}", e))?;
-    let resp: web_sys::Response = resp.dyn_into().unwrap();
-    let array_buffer = wasm_bindgen_futures::JsFuture::from(resp.array_buffer().unwrap())
+
+    let resp: Response = resp_js.dyn_into().map_err(|_| "Response cast failed")?;
+    let array_buffer = JsFuture::from(resp.array_buffer().map_err(|_| "ArrayBuffer error")?)
         .await
-        .map_err(|e| format!("ArrayBuffer error: {:?}", e))?;
+        .map_err(|e| format!("ArrayBuffer await failed: {:?}", e))?;
+
     Ok(js_sys::Uint8Array::new(&array_buffer).to_vec())
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn fetch_text(url: &str) -> Result<String, String> {
-    let resp = wasm_bindgen_futures::JsFuture::from(web_sys::window().unwrap().fetch_with_str(url))
-        .await
+pub async fn fetch_text(url: &str) -> Result<String, String> {
+    let global = get_global()?;
+
+    let resp_js = match global {
+        Global::Window(win) => JsFuture::from(win.fetch_with_str(url)).await,
+        Global::Worker(worker) => JsFuture::from(worker.fetch_with_str(url)).await,
+    }
         .map_err(|e| format!("Fetch error: {:?}", e))?;
-    let resp: web_sys::Response = resp.dyn_into().unwrap();
-    let text = wasm_bindgen_futures::JsFuture::from(resp.text().unwrap())
+
+    let resp: Response = resp_js.dyn_into().map_err(|_| "Response cast failed")?;
+    let text_js = JsFuture::from(resp.text().map_err(|_| "Text conversion failed")?)
         .await
-        .map_err(|e| format!("Text conversion error: {:?}", e))?;
-    Ok(text.as_string().unwrap())
+        .map_err(|e| format!("Text await failed: {:?}", e))?;
+
+    Ok(text_js.as_string().ok_or("Failed to convert text")?)
 }
 
 #[cfg(target_arch = "wasm32")]
