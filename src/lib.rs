@@ -240,7 +240,7 @@ impl Model {
 
         Ok(())
     }
-    pub fn encode(&self, texts: Vec<&str>, normalize: bool) -> Result<Vec<Vec<f32>>> {
+    pub fn encode(&self, texts: Vec<&str>, normalize_embeddings: bool) -> Result<Vec<Vec<f32>>> {
         #[cfg(target_arch = "wasm32")]
         let encodings = self.tokenizer.encode_batch(texts, 512)?;
 
@@ -275,17 +275,38 @@ impl Model {
         let embeddings = self.forward(&input_ids, &attention_mask)?;
         let vector: Vec<Vec<f32>> = embeddings.outer_iter().map(|row| row.to_vec()).collect();
 
-        if normalize {
+        if normalize_embeddings {
+
             Ok(vector
                 .into_iter()
                 .map(|emb| {
-                    let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    let norm = Self::normalize(emb.as_slice());
                     emb.into_iter().map(|x| x / norm.max(1e-12)).collect()
                 })
                 .collect())
         } else {
             Ok(vector)
         }
+    }
+
+    fn normalize(slice: &[f32]) -> f32 {
+        const CHUNK: usize = 8;
+        if slice.len() < CHUNK {
+            return slice.iter().map(|x| x * x).sum::<f32>().sqrt();
+        }
+
+        let (chunks, tail) = slice.split_at(slice.len() - (slice.len() % CHUNK));
+        let chunk_sum: f32 = chunks.chunks_exact(CHUNK)
+            .map(|c| {
+                let s0 = c[0]*c[0] + c[1]*c[1];
+                let s1 = c[2]*c[2] + c[3]*c[3];
+                let s2 = c[4]*c[4] + c[5]*c[5];
+                let s3 = c[6]*c[6] + c[7]*c[7];
+                (s0 + s1) + (s2 + s3)
+            })
+            .sum();
+
+        (chunk_sum + tail.iter().map(|x| x * x).sum::<f32>()).sqrt()
     }
 
     fn forward(
@@ -389,7 +410,7 @@ impl MultiHeadAttention {
         let scores = scores / (self.head_dim as f32).sqrt();
 
         // Apply mask
-        let scores = apply_attention_mask_4d(scores, attention_mask);
+        let scores = apply_attention_mask(scores, attention_mask);
 
         // Softmax
         let weights = softmax(&scores);
@@ -434,7 +455,62 @@ impl FeedForward {
     }
 }
 
-// helpers
+/*
+**   Public function
+**/
+
+
+
+/// Computes cosine similarity between two vectors: dot(a,b) / (||a|| * ||b||).
+///
+/// Uses tree reduction pattern for better CPU instruction-level parallelism.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    const CHUNK: usize = 8;
+    let n = a.len().min(b.len());
+
+    // Split arrays into chunks of 8 for tree reduction
+    let (chunks_a, tail_a) = a[..n].split_at(n - (n % CHUNK));
+    let (chunks_b, tail_b) = b[..n].split_at(n - (n % CHUNK));
+
+    // Tree-reduce dot product in chunks of 8
+    // CPU can hopefully compute d0,d1,d2,d3 in parallel, then combine them
+    let chunk_dot: f32 = chunks_a.chunks_exact(CHUNK)
+        .zip(chunks_b.chunks_exact(CHUNK))
+        .map(|(ca, cb)| {
+            // First level: 4 independent multiplications (parallelizable)
+            let d0 = ca[0] * cb[0] + ca[1] * cb[1];
+            let d1 = ca[2] * cb[2] + ca[3] * cb[3];
+            let d2 = ca[4] * cb[4] + ca[5] * cb[5];
+            let d3 = ca[6] * cb[6] + ca[7] * cb[7];
+            // Second level: combine pairs (still some parallelism)
+            (d0 + d1) + (d2 + d3)
+        })
+        .sum();
+
+    // Handle remaining elements that didn't fit in chunks
+    let dot = chunk_dot + tail_a.iter().zip(tail_b).map(|(x, y)| x * y).sum::<f32>();
+
+    // Compute L2 norms (TODO: could use tree reduction here)
+    let norm_a = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    // Add small epsilon to prevent division by zero
+    dot / (norm_a * norm_b + 1e-8)
+}
+
+/*
+**   Private functions, mainly Linear Algebra and Matrix multiplication dot product
+**/
+
+
+/// Performs batched matrix multiplication between a 3D and 2D tensor.
+///
+/// Multiplies each 2D slice of the 3D tensor with the same 2D matrix.
+/// Input shapes: a=[batch, m, k], b=[k, n]
+/// Output shape: [batch, m, n]
+///
+/// This is used for linear transformations in BERT where the same weight matrix
+/// is applied to each example in the batch.
 fn matmul_3d_2d(a: &Array3<f32>, b: &Array2<f32>) -> Array3<f32> {
     let (batch, m, k) = a.dim();
     let n = b.shape()[1];
@@ -444,53 +520,73 @@ fn matmul_3d_2d(a: &Array3<f32>, b: &Array2<f32>) -> Array3<f32> {
         "Matrix dimensions are incompatible for multiplication"
     );
 
+    // Ensure contiguous memory layout
     let a_cont = a.as_standard_layout();
     let b_cont = b.as_standard_layout();
 
+    // allocate output tensor
     let mut c = Array3::<f32>::zeros((batch, m, n));
 
+    // iter batch dimension, multiplying each slice with the weight matrix
     Zip::from(c.axis_iter_mut(Axis(0)))
         .and(a_cont.axis_iter(Axis(0)))
         .for_each(|mut c_slice, a_slice| {
+            // can potentially use BLAS gemm
             let result = a_slice.dot(&b_cont);
             c_slice.assign(&result);
         });
 
     c
 }
-// just a helper, used for unit tests, can be improved
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a = a.iter().map(|x| x*x).sum::<f32>().sqrt();
-    let norm_b = b.iter().map(|x| x*x).sum::<f32>().sqrt();
-    dot / (norm_a * norm_b + 1e-8)
-}
-// todo: vectorize
+
+/// Computes softmax activation over the last dimension of a 4D tensor.
+///
+/// Takes attention scores of shape [batch, num_heads, seq_len, seq_len]
+/// and normalizes them to probabilities that sum to 1.0 along the last axis.
+///
+/// Uses numerically stable softmax: softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
 fn softmax(scores: &Array4<f32>) -> Array4<f32> {
-    let max_along_axis = scores.fold_axis(Axis(3), f32::NEG_INFINITY, |&acc, &elem| acc.max(elem));
-    let max_expanded = max_along_axis.insert_axis(Axis(3));
-    let mut stable_scores = scores.to_owned();
-    stable_scores -= &max_expanded;
+    // Find maximum value along last axis for numerical stability
+    // Shape: [batch, heads, seq_len, 1] after insert_axis
+    let max_vals = scores.fold_axis(Axis(3), f32::NEG_INFINITY, |&acc, &x| acc.max(x));
+    let max_expanded = max_vals.insert_axis(Axis(3));
 
-    // Exponentiate
-    let exp_scores = stable_scores.mapv_into(f32::exp);
+    // Subtract max for numerical stability (prevents overflow in exp)
+    // exp(x - max) is equivalent to exp(x) / exp(max) but avoids large numbers
+    let stable_scores = scores - &max_expanded;
 
-    // Sum along the axis and normalize
-    let sum_exp = exp_scores.sum_axis(Axis(3));
-    &exp_scores / &sum_exp.insert_axis(Axis(3)).mapv(|x| x.max(1e-9))
+    // Compute exp of stabilized scores
+    let exp_scores = stable_scores.mapv(|x| x.exp());
+
+    // Sum exponentials along last axis, then expand back to 4D for broadcasting
+    let sum_exp = exp_scores.sum_axis(Axis(3)).insert_axis(Axis(3));
+
+    // Normalize by dividing by sum (using reciprocal multiplication for speed)
+    // The max(1e-9) prevents division by zero for all-padding sequences
+    &exp_scores * &sum_exp.mapv(|x| 1.0 / x.max(1e-9))
 }
-fn apply_attention_mask_4d(mut scores: Array4<f32>, mask: &Array2<f32>) -> Array4<f32> {
+
+/// Applies attention mask to attention scores before softmax computation.
+///
+/// Takes a 4D tensor of attention scores [batch, num_heads, seq_len, seq_len]
+/// and a 2D attention mask [batch, seq_len] where 1.0 = real token, 0.0 = padding.
+///
+/// Sets scores for padding tokens to negative infinity so they become ~0 after softmax,
+/// preventing the model from attending to padding positions.
+fn apply_attention_mask(mut scores: Array4<f32>, mask: &Array2<f32>) -> Array4<f32> {
     let scores_shape = scores.dim();
+    // Expand mask from [batch, seq] to [batch, 1, 1, seq] for broadcasting
+    // This allows the same mask to apply to all heads and query positions
     let mask_4d = mask.clone().insert_axis(Axis(1)).insert_axis(Axis(2));
 
+    // Broadcast the mask to match scores shape [batch, heads, seq, seq]
     if let Some(broadcast_mask) = mask_4d.broadcast(scores_shape) {
-        // Broadcast successful now vectorize
+        // Apply mask: where mask is 0 (padding), set score to NEG_INFITNY
         Zip::from(&mut scores)
             .and(broadcast_mask)
             .for_each(|score_elem, mask_elem| {
                 if *mask_elem == 0.0 {
-                    *score_elem = -1e9;
+                    *score_elem = f32::NEG_INFINITY;
                 }
             });
     }
@@ -565,48 +661,67 @@ fn gelu(x: &Array3<f32>) -> Array3<f32> {
     })
 }
 
-// todo: very bad
 fn apply_layer_norm_3d(hidden: &Array3<f32>, ln: &LayerNorm) -> Array3<f32> {
     let (batch, seq, hidden_size) = hidden.dim();
     let mut result = Array3::<f32>::zeros((batch, seq, hidden_size));
+    let inv_count = 1.0 / hidden_size as f32; // reciprocal of hidden_size
 
     for b in 0..batch {
         for s in 0..seq {
             let slice = hidden.slice(s![b, s, ..]);
 
-            // Compute mean and variance manually
-            let mean = slice.mean().unwrap();
-            let var = slice.mapv(|x| (x - mean).powi(2)).mean().unwrap();
-            let std = (var + ln.eps).sqrt();
+            // Single pass for mean and variance
+            let mut sum = 0.0;
+            let mut sum_sq = 0.0;
+            for &x in slice.iter() {
+                sum += x;
+                sum_sq += x * x;
+            }
+            // reciprocal multiplication
+            let mean = sum * inv_count;
+            let var = (sum_sq * inv_count) - mean * mean;
 
-            // Broadcast weight and bias for LayerNorm
-            let normalized = (&slice - mean) / std;
-            let scaled = &normalized * &ln.weight + &ln.bias;
+            // Reciprocal stddev (avoid division in the loop)
+            let inv_std = 1.0 / (var + ln.eps).sqrt();
 
-            result.slice_mut(s![b, s, ..]).assign(&scaled);
+            //  normalization
+            for (i, &x) in slice.iter().enumerate() {
+                result[[b, s, i]] = (x - mean) * inv_std * ln.weight[i] + ln.bias[i];
+            }
         }
     }
-
     result
 }
 
+/// Performs mean pooling over sequence dimension to convert token embeddings to sentence embeddings.
+///
+/// Takes a 3D tensor of shape [batch, sequence_length, hidden_size] containing token embeddings
+/// and produces a 2D tensor of shape [batch, hidden_size] containing sentence embeddings.
+///
+/// The attention_mask indicates which tokens are real (1.0) vs padding (0.0).
+/// Only real tokens contribute to the mean.
 fn mean_pool(hidden: &Array3<f32>, attention_mask: &Array2<f32>) -> Result<Array2<f32>> {
     let (batch, _, hidden_size) = hidden.dim();
     let mut result = Array2::zeros((batch, hidden_size));
 
     for b in 0..batch {
         let mut sum = Array1::zeros(hidden_size);
+        // count non-padding tokens
         let mut count = 0.0;
-
         for s in 0..hidden.shape()[1] {
+            // include non-padding tokens (mask == 1.0)
             if attention_mask[[b, s]] == 1.0 {
+                // Add this token's embedding to the sum
                 sum = sum + hidden.slice(s![b, s, ..]);
                 count += 1.0;
             }
         }
 
+        // Compute mean by dividing sum by count of real tokens
+        // Guard against empty sequences (all padding)
         if count > 0.0 {
-            result.slice_mut(s![b, ..]).assign(&(sum / count));
+            let inv_count = 1.0 / count;
+            result.slice_mut(s![b, ..]).assign(&(sum * inv_count));
         }
     }
 
