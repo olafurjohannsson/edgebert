@@ -10,9 +10,17 @@
 
 ## Overview
 
-EdgeBERT is a lightweight, dependency-free Rust implementation of a BERT encoder and its WordPiece tokenizer. 
-This project was made because of the need for a pure Rust implementation to do inference on sentence-transformers,
-mainly MiniLM without pulling in big runtimes or C/C++, Python dependencies
+EdgeBERT is a lightweight Rust implementation of BERT inference focused on native, edge computing and WASM deployment. Run sentence-transformers models anywhere without Python or large ML runtimes.
+
+## Status
+- ✅ MiniLM-L6-v2 inference working
+- ✅ WASM support
+- ⚠️ Performance optimization ongoing
+- 🚧 Additional models coming soon
+
+## Contributions
+
+All contributions welcome, this is very early stages.
 
 ## Components
 
@@ -21,6 +29,16 @@ mainly MiniLM without pulling in big runtimes or C/C++, Python dependencies
 - Cross-Platform (WebAssembly and native)
 - No Python or C/C++ dependencies except for OpenBLAS for ndarray vectorized matrix operations
 
+**Use this if you need:**
+- Embeddings in pure Rust without Python/C++ dependencies
+- BERT in browsers or edge devices
+- Offline RAG systems
+- Small binary size over maximum speed
+
+**Don't use this if you need:**
+- Multiple model architectures (currently only MiniLM)
+- GPU acceleration
+- Production-grade performance (use ONNX Runtime instead)
 
 ## Getting Started
 
@@ -61,10 +79,22 @@ Text: How are you == [-0.031447295, 0.03784213, 0.0761843, 0.045665547, -0.00122
 
 You can see the full example under `examples/basic.rs` - to build and run:
 ```bash
-cargo run --example basic
+cargo run --release --example basic
 ```
 
 ### 2. WebAssembly
+
+```bash
+# Install wasm-pack
+curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+# Build
+./scripts/wasm-build.sh
+
+# Serve
+cd examples && npx serve
+```
+
 ```javascript
 <!DOCTYPE html>
 <html lang="en">
