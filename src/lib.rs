@@ -385,17 +385,17 @@ impl MultiHeadAttention {
             .permuted_axes([0, 2, 1, 3]);
 
         // Compute attention scores
-        let scores = matmul_4d_fixed(&q, &k.permuted_axes([0, 1, 3, 2]));
+        let scores = matmul_4d(&q, &k.permuted_axes([0, 1, 3, 2]));
         let scores = scores / (self.head_dim as f32).sqrt();
 
         // Apply mask
         let scores = apply_attention_mask_4d(scores, attention_mask);
 
         // Softmax
-        let weights = softmax_4d_fixed(&scores);
+        let weights = softmax(&scores);
 
         // Apply attention to values
-        let context = matmul_4d_fixed(&weights, &v);
+        let context = matmul_4d(&weights, &v);
 
         // Reshape back - use to_shape again
         let context = context.permuted_axes([0, 2, 1, 3]);
@@ -458,23 +458,27 @@ fn matmul_3d_2d(a: &Array3<f32>, b: &Array2<f32>) -> Array3<f32> {
 
     c
 }
-
+// just a helper, used for unit tests, can be improved
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len());
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a = a.iter().map(|x| x*x).sum::<f32>().sqrt();
+    let norm_b = b.iter().map(|x| x*x).sum::<f32>().sqrt();
+    dot / (norm_a * norm_b + 1e-8)
+}
 // todo: vectorize
-fn softmax_4d_fixed(scores: &Array4<f32>) -> Array4<f32> {
-    // Subtract max for numerical stability
+fn softmax(scores: &Array4<f32>) -> Array4<f32> {
     let max_along_axis = scores.fold_axis(Axis(3), f32::NEG_INFINITY, |&acc, &elem| acc.max(elem));
     let max_expanded = max_along_axis.insert_axis(Axis(3));
-    let stable_scores = scores - max_expanded;
+    let mut stable_scores = scores.to_owned();
+    stable_scores -= &max_expanded;
 
     // Exponentiate
-    let exp_scores = stable_scores.mapv(|x| x.exp());
+    let exp_scores = stable_scores.mapv_into(f32::exp);
 
-    // Sum along the axis
+    // Sum along the axis and normalize
     let sum_exp = exp_scores.sum_axis(Axis(3));
-    let sum_exp_expanded = sum_exp.insert_axis(Axis(3)).mapv(|x| x.max(1e-9));
-
-    // Normalize
-    &exp_scores / sum_exp_expanded
+    &exp_scores / &sum_exp.insert_axis(Axis(3)).mapv(|x| x.max(1e-9))
 }
 fn apply_attention_mask_4d(mut scores: Array4<f32>, mask: &Array2<f32>) -> Array4<f32> {
     let scores_shape = scores.dim();
@@ -494,7 +498,7 @@ fn apply_attention_mask_4d(mut scores: Array4<f32>, mask: &Array2<f32>) -> Array
     scores
 }
 
-fn matmul_4d_fixed(a: &Array4<f32>, b: &Array4<f32>) -> Array4<f32> {
+fn matmul_4d(a: &Array4<f32>, b: &Array4<f32>) -> Array4<f32> {
     assert_eq!(a.shape()[0], b.shape()[0], "Batch size mismatch");
     assert_eq!(a.shape()[1], b.shape()[1], "Heads mismatch");
     assert_eq!(a.shape()[3], b.shape()[2], "Dimension mismatch");
@@ -764,5 +768,58 @@ impl WasmModel {
         let vector: Vec<f32> = embeddings.into_iter().flatten().collect();
 
         Ok(vector)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::{Array4};
+
+    #[test]
+    fn test_softmax_simple() {
+        let input: Array4<f32> = Array4::from_shape_vec(
+            (1, 1, 1, 3),      // shape: (batch, seq, heads, dim)
+            vec![1.0, 2.0, 3.0]
+        ).unwrap();
+        let output = softmax(&input);
+        let sum_last_axis = output.sum_axis(Axis(3));
+        assert!((sum_last_axis[[0,0,0]] - 1.0).abs() < 1e-6);
+        assert!(output.iter().all(|&x| x > 0.0));
+    }
+    #[test]
+    fn test_model_encode_and_cosine_similarity() -> Result<()> {
+        let model = Model::from_pretrained(ModelType::MiniLML6V2)?;
+        let texts = vec!["Hello world", "Hello world", "Goodbye world"];
+        let embeddings = model.encode(texts.clone(), true)?;
+        let sim_00 = cosine_similarity(&embeddings[0], &embeddings[0]);
+        let sim_01 = cosine_similarity(&embeddings[0], &embeddings[1]);
+        let sim_02 = cosine_similarity(&embeddings[0], &embeddings[2]);
+        assert!((sim_00 - 1.0).abs() < 1e-6, "Self similarity should be 1");
+        assert!(sim_01 <= 1.0 && sim_01 >= -1.0, "Cosine similarity in [-1,1]");
+        assert!(sim_02 <= 1.0 && sim_02 >= -1.0, "Cosine similarity in [-1,1]");
+        let sim_10 = cosine_similarity(&embeddings[1], &embeddings[0]);
+        assert!((sim_01 - sim_10).abs() < 1e-6, "Cosine similarity should be symmetric");
+
+        Ok(())
+    }
+    #[test]
+    fn test_layer_norm() {
+        let input: Array3<f32> = Array3::from_shape_vec(
+            (1, 1, 4),
+            vec![1.0, 2.0, 3.0, 4.0]
+        ).unwrap();
+
+        let ln = LayerNorm {
+            weight: Array1::from_vec(vec![1.0, 1.0, 1.0, 1.0]),
+            bias: Array1::from_vec(vec![0.0, 0.0, 0.0, 0.0]),
+            eps: 1e-5,
+        };
+        let output = apply_layer_norm_3d(&input, &ln);
+        let mean = output.mean_axis(Axis(2)).unwrap();
+        let std = output.std_axis(Axis(2), 0.0);
+        assert!((mean[[0,0]]).abs() < 1e-5);
+        assert!((std[[0,0]] - 1.0).abs() < 1e-5);
     }
 }
