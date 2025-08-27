@@ -79,7 +79,7 @@ Text: How are you == [-0.031447295, 0.03784213, 0.0761843, 0.045665547, -0.00122
 
 You can see the full example under `examples/basic.rs` - to build and run:
 ```bash
-cargo run --example basic
+cargo run --release --example basic
 ```
 
 ### 2. WebAssembly
