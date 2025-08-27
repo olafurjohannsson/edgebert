@@ -52,22 +52,23 @@ struct BertLayer {
 }
 
 struct MultiHeadAttention {
-    query_weight: Array2<f32>,
+    query_weight_t: Array2<f32>,
     query_bias: Array1<f32>,
-    key_weight: Array2<f32>,
+    key_weight_t: Array2<f32>,
     key_bias: Array1<f32>,
-    value_weight: Array2<f32>,
+    value_weight_t: Array2<f32>,
     value_bias: Array1<f32>,
-    output_weight: Array2<f32>,
+    output_weight_t: Array2<f32>,
     output_bias: Array1<f32>,
     num_heads: usize,
     head_dim: usize,
+    scale_factor: f32,
 }
 
 struct FeedForward {
-    dense1_weight: Array2<f32>,
+    dense1_weight_t: Array2<f32>,
     dense1_bias: Array1<f32>,
-    dense2_weight: Array2<f32>,
+    dense2_weight_t: Array2<f32>,
     dense2_bias: Array1<f32>,
 }
 
@@ -108,27 +109,44 @@ impl Model {
             let prefix = format!("encoder.layer.{}", i);
 
             let attention = MultiHeadAttention {
-                query_weight: weights
-                    .get_array2(&format!("{}.attention.self.query.weight", prefix))?,
+                query_weight_t: weights
+                    .get_array2(&format!("{}.attention.self.query.weight", prefix))?
+                    .t()
+                    .to_owned(),
                 query_bias: weights.get_array1(&format!("{}.attention.self.query.bias", prefix))?,
-                key_weight: weights.get_array2(&format!("{}.attention.self.key.weight", prefix))?,
+                key_weight_t: weights
+                    .get_array2(&format!("{}.attention.self.key.weight", prefix))?
+                    .t()
+                    .to_owned(),
                 key_bias: weights.get_array1(&format!("{}.attention.self.key.bias", prefix))?,
-                value_weight: weights
-                    .get_array2(&format!("{}.attention.self.value.weight", prefix))?,
+                value_weight_t: weights
+                    .get_array2(&format!("{}.attention.self.value.weight", prefix))?
+                    .t()
+                    .to_owned(),
                 value_bias: weights.get_array1(&format!("{}.attention.self.value.bias", prefix))?,
-                output_weight: weights
-                    .get_array2(&format!("{}.attention.output.dense.weight", prefix))?,
+                output_weight_t: weights
+                    .get_array2(&format!("{}.attention.output.dense.weight", prefix))?
+                    .t()
+                    .to_owned(),
                 output_bias: weights
                     .get_array1(&format!("{}.attention.output.dense.bias", prefix))?,
                 num_heads: config.num_attention_heads,
                 head_dim: config.hidden_size / config.num_attention_heads,
+                // Pre-calculate the scale factor with reciprocal for multiplication
+                scale_factor: 1.0
+                    / ((config.hidden_size / config.num_attention_heads) as f32).sqrt(),
             };
 
             let intermediate = FeedForward {
-                dense1_weight: weights
-                    .get_array2(&format!("{}.intermediate.dense.weight", prefix))?,
+                dense1_weight_t: weights
+                    .get_array2(&format!("{}.intermediate.dense.weight", prefix))?
+                    .t()
+                    .to_owned(),
                 dense1_bias: weights.get_array1(&format!("{}.intermediate.dense.bias", prefix))?,
-                dense2_weight: weights.get_array2(&format!("{}.output.dense.weight", prefix))?,
+                dense2_weight_t: weights
+                    .get_array2(&format!("{}.output.dense.weight", prefix))?
+                    .t()
+                    .to_owned(),
                 dense2_bias: weights.get_array1(&format!("{}.output.dense.bias", prefix))?,
             };
 
@@ -273,40 +291,21 @@ impl Model {
         }
 
         let embeddings = self.forward(&input_ids, &attention_mask)?;
-        let vector: Vec<Vec<f32>> = embeddings.outer_iter().map(|row| row.to_vec()).collect();
 
-        if normalize_embeddings {
-
-            Ok(vector
-                .into_iter()
-                .map(|emb| {
-                    let norm = Self::normalize(emb.as_slice());
-                    emb.into_iter().map(|x| x / norm.max(1e-12)).collect()
-                })
-                .collect())
+        let final_embeddings = if normalize_embeddings {
+            let norms = embeddings.mapv(|x| x.powi(2)).sum_axis(Axis(1));
+            let norms = norms.mapv(|x| x.sqrt().max(1e-12));
+            let norms_expanded = norms.insert_axis(Axis(1));
+            embeddings / &norms_expanded
         } else {
-            Ok(vector)
-        }
-    }
+            embeddings
+        };
 
-    fn normalize(slice: &[f32]) -> f32 {
-        const CHUNK: usize = 8;
-        if slice.len() < CHUNK {
-            return slice.iter().map(|x| x * x).sum::<f32>().sqrt();
-        }
-
-        let (chunks, tail) = slice.split_at(slice.len() - (slice.len() % CHUNK));
-        let chunk_sum: f32 = chunks.chunks_exact(CHUNK)
-            .map(|c| {
-                let s0 = c[0]*c[0] + c[1]*c[1];
-                let s1 = c[2]*c[2] + c[3]*c[3];
-                let s2 = c[4]*c[4] + c[5]*c[5];
-                let s3 = c[6]*c[6] + c[7]*c[7];
-                (s0 + s1) + (s2 + s3)
-            })
-            .sum();
-
-        (chunk_sum + tail.iter().map(|x| x * x).sum::<f32>()).sqrt()
+        let vector: Vec<Vec<f32>> = final_embeddings
+            .outer_iter()
+            .map(|row| row.to_vec())
+            .collect();
+        Ok(vector)
     }
 
     fn forward(
@@ -314,35 +313,25 @@ impl Model {
         input_ids: &Array2<f32>,
         attention_mask: &Array2<f32>,
     ) -> Result<Array2<f32>> {
-        let batch_size = input_ids.shape()[0];
-        let seq_len = input_ids.shape()[1];
+        let (batch_size, seq_len) = input_ids.dim();
 
-        // Embedding layer
         let mut hidden = Array3::<f32>::zeros((batch_size, seq_len, self.config.hidden_size));
-
-        // Word embeddings
         for i in 0..batch_size {
-            for j in 0..seq_len {
-                let token_id = input_ids[[i, j]] as usize;
-                let word_emb = self.word_embeddings.row(token_id);
-                let pos_emb = self.position_embeddings.row(j);
-                let type_emb = self.token_type_embeddings.row(0); // token_type_id = 0
-
-                for k in 0..self.config.hidden_size {
-                    hidden[[i, j, k]] = word_emb[k] + pos_emb[k] + type_emb[k];
-                }
-            }
+            let ids_slice = input_ids.row(i);
+            let ids_usize: Vec<usize> = ids_slice.iter().map(|&x| x as usize).collect();
+            let word_embs = self.word_embeddings.select(Axis(0), &ids_usize);
+            hidden.slice_mut(s![i, .., ..]).assign(&word_embs);
         }
+        let pos_embeddings = self.position_embeddings.slice(s![0..seq_len, ..]);
+        hidden += &pos_embeddings;
 
-        // Apply embedding layer norm
-        hidden = apply_layer_norm_3d(&hidden, &self.layer_norm_final);
+        let type_embeddings = self.token_type_embeddings.row(0);
+        hidden += &type_embeddings;
 
-        // Pass through layers
+        let mut hidden = apply_layer_norm_3d(&hidden, &self.layer_norm_final);
         for layer in &self.layers {
             hidden = layer.forward(hidden, attention_mask)?;
         }
-
-        // Mean pooling
         mean_pool(&hidden, attention_mask)
     }
 }
@@ -350,14 +339,14 @@ impl Model {
 impl BertLayer {
     fn forward(&self, input: Array3<f32>, attention_mask: &Array2<f32>) -> Result<Array3<f32>> {
         // Self attention
-        let attention_out = self.attention.forward(&input, attention_mask)?;
-        let attention_out = &input + &attention_out;
+        let mut attention_out = self.attention.forward(&input, attention_mask)?;
+        attention_out += &input;
         let attention_out = apply_layer_norm_3d(&attention_out, &self.layer_norm1);
 
         // Feed forward
-        let ff_out = self.intermediate.forward(&attention_out)?;
-        let output = &attention_out + &ff_out;
-        let output = apply_layer_norm_3d(&output, &self.layer_norm2);
+        let mut ff_out = self.intermediate.forward(&attention_out)?;
+        ff_out += &attention_out;
+        let output = apply_layer_norm_3d(&ff_out, &self.layer_norm2);
 
         Ok(output)
     }
@@ -369,45 +358,30 @@ impl MultiHeadAttention {
         let seq_len = hidden.shape()[1];
 
         // Linear projections WITH BIAS
-        let q = matmul_3d_2d(hidden, &self.query_weight.t().to_owned());
-        let q = q + &self
-            .query_bias
-            .view()
-            .insert_axis(Axis(0))
-            .insert_axis(Axis(0));
+        let mut q = matmul_3d_2d(hidden, &self.query_weight_t);
+        q += &self.query_bias;
 
-        let k = matmul_3d_2d(hidden, &self.key_weight.t().to_owned());
-        let k = k + &self
-            .key_bias
-            .view()
-            .insert_axis(Axis(0))
-            .insert_axis(Axis(0));
+        let mut k = matmul_3d_2d(hidden, &self.key_weight_t);
+        k += &self.key_bias;
 
-        let v = matmul_3d_2d(hidden, &self.value_weight.t().to_owned());
-        let v = v + &self
-            .value_bias
-            .view()
-            .insert_axis(Axis(0))
-            .insert_axis(Axis(0));
+        let mut v = matmul_3d_2d(hidden, &self.value_weight_t);
+        v += &self.value_bias;
 
         let q = q
-            .to_shape((batch_size, seq_len, self.num_heads, self.head_dim))?
-            .to_owned() // Create owned contiguous copy
+            .into_shape_with_order((batch_size, seq_len, self.num_heads, self.head_dim))?
             .permuted_axes([0, 2, 1, 3]);
 
         let k = k
-            .to_shape((batch_size, seq_len, self.num_heads, self.head_dim))?
-            .to_owned()
+            .into_shape_with_order((batch_size, seq_len, self.num_heads, self.head_dim))?
             .permuted_axes([0, 2, 1, 3]);
 
         let v = v
-            .to_shape((batch_size, seq_len, self.num_heads, self.head_dim))?
-            .to_owned()
+            .into_shape_with_order((batch_size, seq_len, self.num_heads, self.head_dim))?
             .permuted_axes([0, 2, 1, 3]);
 
         // Compute attention scores
-        let scores = matmul_4d(&q, &k.permuted_axes([0, 1, 3, 2]));
-        let scores = scores / (self.head_dim as f32).sqrt();
+        let mut scores = matmul_4d(&q, &k.permuted_axes([0, 1, 3, 2]));
+        scores *= self.scale_factor;
 
         // Apply mask
         let scores = apply_attention_mask(scores, attention_mask);
@@ -421,45 +395,32 @@ impl MultiHeadAttention {
         // Reshape back - use to_shape again
         let context = context.permuted_axes([0, 2, 1, 3]);
         let context = context
-            .to_shape((batch_size, seq_len, self.num_heads * self.head_dim))?
+            .as_standard_layout()
+            .into_shape_with_order((batch_size, seq_len, self.num_heads * self.head_dim))?
             .to_owned();
 
-        let output = matmul_3d_2d(&context, &self.output_weight.t().to_owned());
-        Ok(output
-            + &self
-                .output_bias
-                .view()
-                .insert_axis(Axis(0))
-                .insert_axis(Axis(0)))
+        let mut output = matmul_3d_2d(&context, &self.output_weight_t);
+        output += &self.output_bias;
+
+        Ok(output)
     }
 }
 
 impl FeedForward {
     fn forward(&self, hidden: &Array3<f32>) -> Result<Array3<f32>> {
-        let intermediate = matmul_3d_2d(hidden, &self.dense1_weight.t().to_owned());
-        let intermediate = intermediate
-            + &self
-                .dense1_bias
-                .view()
-                .insert_axis(Axis(0))
-                .insert_axis(Axis(0));
+        let mut intermediate = matmul_3d_2d(hidden, &self.dense1_weight_t);
+        intermediate += &self.dense1_bias; // in place mutation, no allocation
         let intermediate = gelu(&intermediate);
 
-        let output = matmul_3d_2d(&intermediate, &self.dense2_weight.t().to_owned());
-        Ok(output
-            + &self
-                .dense2_bias
-                .view()
-                .insert_axis(Axis(0))
-                .insert_axis(Axis(0)))
+        let mut output = matmul_3d_2d(&intermediate, &self.dense2_weight_t);
+        output += &self.dense2_bias; // in place mutation, no allocation
+        Ok(output)
     }
 }
 
 /*
 **   Public function
 **/
-
-
 
 /// Computes cosine similarity between two vectors: dot(a,b) / (||a|| * ||b||).
 ///
@@ -473,16 +434,14 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let (chunks_b, tail_b) = b[..n].split_at(n - (n % CHUNK));
 
     // Tree-reduce dot product in chunks of 8
-    // CPU can hopefully compute d0,d1,d2,d3 in parallel, then combine them
-    let chunk_dot: f32 = chunks_a.chunks_exact(CHUNK)
+    let chunk_dot: f32 = chunks_a
+        .chunks_exact(CHUNK)
         .zip(chunks_b.chunks_exact(CHUNK))
         .map(|(ca, cb)| {
-            // First level: 4 independent multiplications (parallelizable)
             let d0 = ca[0] * cb[0] + ca[1] * cb[1];
             let d1 = ca[2] * cb[2] + ca[3] * cb[3];
             let d2 = ca[4] * cb[4] + ca[5] * cb[5];
             let d3 = ca[6] * cb[6] + ca[7] * cb[7];
-            // Second level: combine pairs (still some parallelism)
             (d0 + d1) + (d2 + d3)
         })
         .sum();
@@ -501,7 +460,6 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /*
 **   Private functions, mainly Linear Algebra and Matrix multiplication dot product
 **/
-
 
 /// Performs batched matrix multiplication between a 3D and 2D tensor.
 ///
@@ -546,23 +504,15 @@ fn matmul_3d_2d(a: &Array3<f32>, b: &Array2<f32>) -> Array3<f32> {
 ///
 /// Uses numerically stable softmax: softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
 fn softmax(scores: &Array4<f32>) -> Array4<f32> {
-    // Find maximum value along last axis for numerical stability
-    // Shape: [batch, heads, seq_len, 1] after insert_axis
+    // maximum value along last axis
     let max_vals = scores.fold_axis(Axis(3), f32::NEG_INFINITY, |&acc, &x| acc.max(x));
     let max_expanded = max_vals.insert_axis(Axis(3));
-
-    // Subtract max for numerical stability (prevents overflow in exp)
-    // exp(x - max) is equivalent to exp(x) / exp(max) but avoids large numbers
     let stable_scores = scores - &max_expanded;
-
-    // Compute exp of stabilized scores
     let exp_scores = stable_scores.mapv(|x| x.exp());
 
-    // Sum exponentials along last axis, then expand back to 4D for broadcasting
+    // Sum exponentials along last axi
     let sum_exp = exp_scores.sum_axis(Axis(3)).insert_axis(Axis(3));
-
     // Normalize by dividing by sum (using reciprocal multiplication for speed)
-    // The max(1e-9) prevents division by zero for all-padding sequences
     &exp_scores * &sum_exp.mapv(|x| 1.0 / x.max(1e-9))
 }
 
@@ -574,23 +524,15 @@ fn softmax(scores: &Array4<f32>) -> Array4<f32> {
 /// Sets scores for padding tokens to negative infinity so they become ~0 after softmax,
 /// preventing the model from attending to padding positions.
 fn apply_attention_mask(mut scores: Array4<f32>, mask: &Array2<f32>) -> Array4<f32> {
-    let scores_shape = scores.dim();
-    // Expand mask from [batch, seq] to [batch, 1, 1, seq] for broadcasting
-    // This allows the same mask to apply to all heads and query positions
-    let mask_4d = mask.clone().insert_axis(Axis(1)).insert_axis(Axis(2));
-
-    // Broadcast the mask to match scores shape [batch, heads, seq, seq]
-    if let Some(broadcast_mask) = mask_4d.broadcast(scores_shape) {
-        // Apply mask: where mask is 0 (padding), set score to NEG_INFITNY
-        Zip::from(&mut scores)
-            .and(broadcast_mask)
-            .for_each(|score_elem, mask_elem| {
-                if *mask_elem == 0.0 {
-                    *score_elem = f32::NEG_INFINITY;
-                }
-            });
+    for (b, mut query_axis) in scores.axis_iter_mut(Axis(0)).enumerate() {
+        for (q, mut head_axis) in query_axis.axis_iter_mut(Axis(2)).enumerate() {
+            // Check if this token in the sequence is padding
+            if mask[[b, q]] == 0.0 {
+                // If it is, set all its attention scores to -inf
+                head_axis.fill(f32::NEG_INFINITY);
+            }
+        }
     }
-
     scores
 }
 
@@ -662,35 +604,15 @@ fn gelu(x: &Array3<f32>) -> Array3<f32> {
 }
 
 fn apply_layer_norm_3d(hidden: &Array3<f32>, ln: &LayerNorm) -> Array3<f32> {
-    let (batch, seq, hidden_size) = hidden.dim();
-    let mut result = Array3::<f32>::zeros((batch, seq, hidden_size));
-    let inv_count = 1.0 / hidden_size as f32; // reciprocal of hidden_size
+    let mean = hidden.mean_axis(Axis(2)).unwrap();
+    // Calculate variance across the last dimension. Shape: [batch, seq]
+    let var = hidden.var_axis(Axis(2), 1.0);
+    let mean_expanded = mean.insert_axis(Axis(2));
+    let var_expanded = var.insert_axis(Axis(2));
 
-    for b in 0..batch {
-        for s in 0..seq {
-            let slice = hidden.slice(s![b, s, ..]);
-
-            // Single pass for mean and variance
-            let mut sum = 0.0;
-            let mut sum_sq = 0.0;
-            for &x in slice.iter() {
-                sum += x;
-                sum_sq += x * x;
-            }
-            // reciprocal multiplication
-            let mean = sum * inv_count;
-            let var = (sum_sq * inv_count) - mean * mean;
-
-            // Reciprocal stddev (avoid division in the loop)
-            let inv_std = 1.0 / (var + ln.eps).sqrt();
-
-            //  normalization
-            for (i, &x) in slice.iter().enumerate() {
-                result[[b, s, i]] = (x - mean) * inv_std * ln.weight[i] + ln.bias[i];
-            }
-        }
-    }
-    result
+    // reciprocal of standard deviation
+    let inv_std = (&var_expanded + ln.eps).mapv(|x| 1.0 / x.sqrt());
+    (hidden - &mean_expanded) * &inv_std * &ln.weight + &ln.bias
 }
 
 /// Performs mean pooling over sequence dimension to convert token embeddings to sentence embeddings.
@@ -701,31 +623,15 @@ fn apply_layer_norm_3d(hidden: &Array3<f32>, ln: &LayerNorm) -> Array3<f32> {
 /// The attention_mask indicates which tokens are real (1.0) vs padding (0.0).
 /// Only real tokens contribute to the mean.
 fn mean_pool(hidden: &Array3<f32>, attention_mask: &Array2<f32>) -> Result<Array2<f32>> {
-    let (batch, _, hidden_size) = hidden.dim();
-    let mut result = Array2::zeros((batch, hidden_size));
+    let mask_expanded = attention_mask.clone().insert_axis(Axis(2));
+    let masked_hidden = hidden * &mask_expanded;
+    let sum = masked_hidden.sum_axis(Axis(1));
+    let count = attention_mask
+        .sum_axis(Axis(1))
+        .mapv(|x| x.max(1.0))
+        .insert_axis(Axis(1));
 
-    for b in 0..batch {
-        let mut sum = Array1::zeros(hidden_size);
-        // count non-padding tokens
-        let mut count = 0.0;
-        for s in 0..hidden.shape()[1] {
-            // include non-padding tokens (mask == 1.0)
-            if attention_mask[[b, s]] == 1.0 {
-                // Add this token's embedding to the sum
-                sum = sum + hidden.slice(s![b, s, ..]);
-                count += 1.0;
-            }
-        }
-
-        // Compute mean by dividing sum by count of real tokens
-        // Guard against empty sequences (all padding)
-        if count > 0.0 {
-            let inv_count = 1.0 / count;
-            result.slice_mut(s![b, ..]).assign(&(sum * inv_count));
-        }
-    }
-
-    Ok(result)
+    Ok(sum / &count)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -750,7 +656,7 @@ pub enum WasmModelType {
 impl From<WasmModelType> for ModelType {
     fn from(wasm_type: WasmModelType) -> Self {
         match wasm_type {
-            WasmModelType::MiniLML6V2 => ModelType::MiniLML6V2
+            WasmModelType::MiniLML6V2 => ModelType::MiniLML6V2,
         }
     }
 }
@@ -789,7 +695,7 @@ pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
         Global::Window(win) => JsFuture::from(win.fetch_with_str(url)).await,
         Global::Worker(worker) => JsFuture::from(worker.fetch_with_str(url)).await,
     }
-        .map_err(|e| format!("Fetch error: {:?}", e))?;
+    .map_err(|e| format!("Fetch error: {:?}", e))?;
 
     let resp: Response = resp_js.dyn_into().map_err(|_| "Response cast failed")?;
     let array_buffer = JsFuture::from(resp.array_buffer().map_err(|_| "ArrayBuffer error")?)
@@ -807,7 +713,7 @@ pub async fn fetch_text(url: &str) -> Result<String, String> {
         Global::Window(win) => JsFuture::from(win.fetch_with_str(url)).await,
         Global::Worker(worker) => JsFuture::from(worker.fetch_with_str(url)).await,
     }
-        .map_err(|e| format!("Fetch error: {:?}", e))?;
+    .map_err(|e| format!("Fetch error: {:?}", e))?;
 
     let resp: Response = resp_js.dyn_into().map_err(|_| "Response cast failed")?;
     let text_js = JsFuture::from(resp.text().map_err(|_| "Text conversion failed")?)
@@ -820,7 +726,6 @@ pub async fn fetch_text(url: &str) -> Result<String, String> {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 impl WasmModel {
-
     #[wasm_bindgen(constructor)]
     pub fn new(
         weights_data: &[u8],
@@ -862,7 +767,7 @@ impl WasmModel {
             fetch_text(config_url),
             fetch_text(tokenizer_url),
         )
-            .await;
+        .await;
 
         let weights = weights.map_err(|e| JsValue::from_str(&e))?;
         let config = config.map_err(|e| JsValue::from_str(&e))?;
@@ -886,21 +791,21 @@ impl WasmModel {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::{Array4};
+    use ndarray::Array4;
 
     #[test]
     fn test_softmax_simple() {
         let input: Array4<f32> = Array4::from_shape_vec(
-            (1, 1, 1, 3),      // shape: (batch, seq, heads, dim)
-            vec![1.0, 2.0, 3.0]
-        ).unwrap();
+            (1, 1, 1, 3), // shape: (batch, seq, heads, dim)
+            vec![1.0, 2.0, 3.0],
+        )
+        .unwrap();
         let output = softmax(&input);
         let sum_last_axis = output.sum_axis(Axis(3));
-        assert!((sum_last_axis[[0,0,0]] - 1.0).abs() < 1e-6);
+        assert!((sum_last_axis[[0, 0, 0]] - 1.0).abs() < 1e-6);
         assert!(output.iter().all(|&x| x > 0.0));
     }
     #[test]
@@ -912,19 +817,26 @@ mod tests {
         let sim_01 = cosine_similarity(&embeddings[0], &embeddings[1]);
         let sim_02 = cosine_similarity(&embeddings[0], &embeddings[2]);
         assert!((sim_00 - 1.0).abs() < 1e-6, "Self similarity should be 1");
-        assert!(sim_01 <= 1.0 && sim_01 >= -1.0, "Cosine similarity in [-1,1]");
-        assert!(sim_02 <= 1.0 && sim_02 >= -1.0, "Cosine similarity in [-1,1]");
+        assert!(
+            sim_01 <= 1.0 && sim_01 >= -1.0,
+            "Cosine similarity in [-1,1]"
+        );
+        assert!(
+            sim_02 <= 1.0 && sim_02 >= -1.0,
+            "Cosine similarity in [-1,1]"
+        );
         let sim_10 = cosine_similarity(&embeddings[1], &embeddings[0]);
-        assert!((sim_01 - sim_10).abs() < 1e-6, "Cosine similarity should be symmetric");
+        assert!(
+            (sim_01 - sim_10).abs() < 1e-6,
+            "Cosine similarity should be symmetric"
+        );
 
         Ok(())
     }
     #[test]
     fn test_layer_norm() {
-        let input: Array3<f32> = Array3::from_shape_vec(
-            (1, 1, 4),
-            vec![1.0, 2.0, 3.0, 4.0]
-        ).unwrap();
+        let input: Array3<f32> =
+            Array3::from_shape_vec((1, 1, 4), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
 
         let ln = LayerNorm {
             weight: Array1::from_vec(vec![1.0, 1.0, 1.0, 1.0]),
@@ -934,7 +846,7 @@ mod tests {
         let output = apply_layer_norm_3d(&input, &ln);
         let mean = output.mean_axis(Axis(2)).unwrap();
         let std = output.std_axis(Axis(2), 0.0);
-        assert!((mean[[0,0]]).abs() < 1e-5);
-        assert!((std[[0,0]] - 1.0).abs() < 1e-5);
+        assert!((mean[[0, 0]]).abs() < 1e-5);
+        assert!((std[[0, 0]] - 1.0).abs() < 1e-5);
     }
 }
