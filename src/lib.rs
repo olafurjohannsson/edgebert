@@ -317,11 +317,14 @@ impl Model {
 
         let mut hidden = Array3::<f32>::zeros((batch_size, seq_len, self.config.hidden_size));
         for i in 0..batch_size {
-            let ids_slice = input_ids.row(i);
-            let ids_usize: Vec<usize> = ids_slice.iter().map(|&x| x as usize).collect();
-            let word_embs = self.word_embeddings.select(Axis(0), &ids_usize);
-            hidden.slice_mut(s![i, .., ..]).assign(&word_embs);
+            for j in 0..seq_len {
+                let token_id = input_ids[[i, j]] as usize;
+                let word_emb = self.word_embeddings.row(token_id);
+                let mut hidden_slice = hidden.slice_mut(s![i, j, ..]);
+                hidden_slice.assign(&word_emb);
+            }
         }
+        
         let pos_embeddings = self.position_embeddings.slice(s![0..seq_len, ..]);
         hidden += &pos_embeddings;
 
@@ -469,6 +472,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// This is used for linear transformations in BERT where the same weight matrix
 /// is applied to each example in the batch.
+#[inline(always)]
 fn matmul_3d_2d(a: &Array3<f32>, b: &Array2<f32>) -> Array3<f32> {
     let (batch, m, k) = a.dim();
     let n = b.shape()[1];
@@ -486,13 +490,34 @@ fn matmul_3d_2d(a: &Array3<f32>, b: &Array2<f32>) -> Array3<f32> {
     let mut c = Array3::<f32>::zeros((batch, m, n));
 
     // iter batch dimension, multiplying each slice with the weight matrix
-    Zip::from(c.axis_iter_mut(Axis(0)))
-        .and(a_cont.axis_iter(Axis(0)))
-        .for_each(|mut c_slice, a_slice| {
-            // can potentially use BLAS gemm
-            let result = a_slice.dot(&b_cont);
-            c_slice.assign(&result);
-        });
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use ndarray::parallel::prelude::*;
+        
+        if batch <= 4 {
+            // Small batches: sequential
+            Zip::from(c.axis_iter_mut(Axis(0)))
+                .and(a_cont.axis_iter(Axis(0)))
+                .for_each(|mut c_slice, a_slice| {
+                    c_slice.assign(&a_slice.dot(&b_cont));
+                });
+        } else {
+            // Large batches: parallel
+            Zip::from(c.axis_iter_mut(Axis(0)))
+                .and(a_cont.axis_iter(Axis(0)))
+                .par_for_each(|mut c_slice, a_slice| {
+                    c_slice.assign(&a_slice.dot(&b_cont));
+                });
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Zip::from(c.axis_iter_mut(Axis(0)))
+            .and(a_cont.axis_iter(Axis(0)))
+            .for_each(|mut c_slice, a_slice| {
+                c_slice.assign(&a_slice.dot(&b_cont));
+            });
+    }
 
     c
 }
@@ -524,18 +549,23 @@ fn softmax(scores: &Array4<f32>) -> Array4<f32> {
 /// Sets scores for padding tokens to negative infinity so they become ~0 after softmax,
 /// preventing the model from attending to padding positions.
 fn apply_attention_mask(mut scores: Array4<f32>, mask: &Array2<f32>) -> Array4<f32> {
-    for (b, mut query_axis) in scores.axis_iter_mut(Axis(0)).enumerate() {
-        for (q, mut head_axis) in query_axis.axis_iter_mut(Axis(2)).enumerate() {
-            // Check if this token in the sequence is padding
-            if mask[[b, q]] == 0.0 {
-                // If it is, set all its attention scores to -inf
-                head_axis.fill(f32::NEG_INFINITY);
-            }
-        }
+    let mask_expanded = mask.clone()
+        .insert_axis(Axis(1))  // [batch, 1, seq]
+        .insert_axis(Axis(2));  // [batch, 1, 1, seq]
+    
+    if let Some(broadcast_mask) = mask_expanded.broadcast(scores.dim()) {
+        Zip::from(&mut scores)
+            .and(&broadcast_mask)
+            .for_each(|s, &m| {
+                if m == 0.0 {
+                    *s = f32::NEG_INFINITY;
+                }
+            });
     }
     scores
 }
 
+#[inline(always)]
 fn matmul_4d(a: &Array4<f32>, b: &Array4<f32>) -> Array4<f32> {
     assert_eq!(a.shape()[0], b.shape()[0], "Batch size mismatch");
     assert_eq!(a.shape()[1], b.shape()[1], "Heads mismatch");
@@ -595,18 +625,24 @@ fn matmul_4d(a: &Array4<f32>, b: &Array4<f32>) -> Array4<f32> {
         .unwrap()
 }
 
+#[inline(always)]
 fn gelu(x: &Array3<f32>) -> Array3<f32> {
-    x.mapv(|val| {
-        let cdf = 0.5
-            * (1.0 + ((2.0 / std::f32::consts::PI).sqrt() * (val + 0.044715 * val.powi(3))).tanh());
-        val * cdf
-    })
+    // Precompute constants
+    let sqrt_2_over_pi = (2.0 / std::f32::consts::PI).sqrt();
+    let coeff = 0.044715;
+    let mut g = x.to_owned();
+    g.mapv_inplace(|val| {
+        let val_cubed = val * val * val; // avoid pow(3) function call
+        let inner = sqrt_2_over_pi * (val + coeff * val_cubed);
+        val * 0.5 * (1.0 + inner.tanh())
+    });
+    g
 }
 
 fn apply_layer_norm_3d(hidden: &Array3<f32>, ln: &LayerNorm) -> Array3<f32> {
     let mean = hidden.mean_axis(Axis(2)).unwrap();
     // Calculate variance across the last dimension. Shape: [batch, seq]
-    let var = hidden.var_axis(Axis(2), 1.0);
+    let var = hidden.var_axis(Axis(2), 0.0);
     let mean_expanded = mean.insert_axis(Axis(2));
     let var_expanded = var.insert_axis(Axis(2));
 
