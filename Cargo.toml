@@ -1,6 +1,6 @@
 [package]
 name = "edgebert"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 authors = ["Ólafur Aron Jóhannsson <olafurjohannss@gmail.com>"]
 description = "Fast local text embeddings library for Rust and WASM for BERT inference on native and edge devices with no dependencies."
