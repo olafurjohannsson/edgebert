@@ -91,6 +91,9 @@ pub struct Config {
     pub model_type: String,
 }
 
+const SQRT_2_OVER_PI: f32 = 0.7978845608_f32;
+const GELU_COEFF: f32 = 0.044715_f32;
+
 impl Model {
     pub fn from_weights(
         weights: ModelWeights,
@@ -316,12 +319,28 @@ impl Model {
         let (batch_size, seq_len) = input_ids.dim();
 
         let mut hidden = Array3::<f32>::zeros((batch_size, seq_len, self.config.hidden_size));
-        for i in 0..batch_size {
-            for j in 0..seq_len {
-                let token_id = input_ids[[i, j]] as usize;
-                let word_emb = self.word_embeddings.row(token_id);
-                let mut hidden_slice = hidden.slice_mut(s![i, j, ..]);
-                hidden_slice.assign(&word_emb);
+        // Parallelize over batch dimension
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use ndarray::parallel::prelude::*;
+            hidden.axis_iter_mut(Axis(0))
+                .into_par_iter()
+                .zip(input_ids.axis_iter(Axis(0)))
+                .for_each(|(mut hidden_slice, ids)| {
+                    for (j, &token_id) in ids.iter().enumerate() {
+                        let word_emb = self.word_embeddings.row(token_id as usize);
+                        hidden_slice.slice_mut(s![j, ..]).assign(&word_emb);
+                    }
+                });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for i in 0..batch_size {
+                for j in 0..seq_len {
+                    let token_id = input_ids[[i, j]] as usize;
+                    let word_emb = self.word_embeddings.row(token_id);
+                    hidden.slice_mut(s![i, j, ..]).assign(&word_emb);
+                }
             }
         }
         
@@ -413,7 +432,8 @@ impl FeedForward {
     fn forward(&self, hidden: &Array3<f32>) -> Result<Array3<f32>> {
         let mut intermediate = matmul_3d_2d(hidden, &self.dense1_weight_t);
         intermediate += &self.dense1_bias; // in place mutation, no allocation
-        let intermediate = gelu(&intermediate);
+        
+        gelu(&mut intermediate);
 
         let mut output = matmul_3d_2d(&intermediate, &self.dense2_weight_t);
         output += &self.dense2_bias; // in place mutation, no allocation
@@ -529,16 +549,17 @@ fn matmul_3d_2d(a: &Array3<f32>, b: &Array2<f32>) -> Array3<f32> {
 ///
 /// Uses numerically stable softmax: softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
 fn softmax(scores: &Array4<f32>) -> Array4<f32> {
-    // maximum value along last axis
+    // Use parallel iteration for large batches
     let max_vals = scores.fold_axis(Axis(3), f32::NEG_INFINITY, |&acc, &x| acc.max(x));
     let max_expanded = max_vals.insert_axis(Axis(3));
-    let stable_scores = scores - &max_expanded;
-    let exp_scores = stable_scores.mapv(|x| x.exp());
-
-    // Sum exponentials along last axi
-    let sum_exp = exp_scores.sum_axis(Axis(3)).insert_axis(Axis(3));
-    // Normalize by dividing by sum (using reciprocal multiplication for speed)
-    &exp_scores * &sum_exp.mapv(|x| 1.0 / x.max(1e-9))
+    
+    // Fuse operations to reduce memory access
+    let mut result = scores - &max_expanded;
+    result.mapv_inplace(f32::exp);
+    
+    let sum_exp = result.sum_axis(Axis(3)).insert_axis(Axis(3));
+    result /= &sum_exp;  // More efficient than multiplication by reciprocal for ndarray
+    result
 }
 
 /// Applies attention mask to attention scores before softmax computation.
@@ -626,17 +647,24 @@ fn matmul_4d(a: &Array4<f32>, b: &Array4<f32>) -> Array4<f32> {
 }
 
 #[inline(always)]
-fn gelu(x: &Array3<f32>) -> Array3<f32> {
-    // Precompute constants
-    let sqrt_2_over_pi = (2.0 / std::f32::consts::PI).sqrt();
-    let coeff = 0.044715;
-    let mut g = x.to_owned();
-    g.mapv_inplace(|val| {
-        let val_cubed = val * val * val; // avoid pow(3) function call
-        let inner = sqrt_2_over_pi * (val + coeff * val_cubed);
+fn gelu(x: &mut Array3<f32>) {
+    x.par_mapv_inplace(|val| {
+        let val_squared = val * val;
+        let val_cubed = val_squared * val;
+        let inner = SQRT_2_OVER_PI * (val + GELU_COEFF * val_cubed);
         val * 0.5 * (1.0 + inner.tanh())
     });
-    g
+}
+
+#[inline(always)]
+fn tanh(x: f32) -> f32 {
+    // let x = x.clamp(-3.0, 3.0);
+    // let x2 = x * x;
+    // x * (27.0 + x2) / (27.0 + 9.0 * x2)
+        let x = x.max(-3.0).min(3.0);
+    // Padé approximation of tanh
+    let x2 = x * x;
+    x * (27.0 + x2) / (27.0 + 9.0 * x2)
 }
 
 fn apply_layer_norm_3d(hidden: &Array3<f32>, ln: &LayerNorm) -> Array3<f32> {
