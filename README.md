@@ -26,7 +26,7 @@ All contributions welcome, this is very early stages.
 - Encoder: Run inference to turn text into embeddings
 - WordPiece tokenization: A small tokenization implementation based on WordPiece
 - Cross-Platform (WebAssembly and native)
-- No Python or C/C++ dependencies except for OpenBLAS for ndarray vectorized matrix operations
+- No Python or C/C++ dependencies except for optional feature OpenBLAS for ndarray vectorized matrix operations
 
 **Use this if you need:**
 - Embeddings in pure Rust without Python/C++ dependencies
