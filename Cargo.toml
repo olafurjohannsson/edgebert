@@ -1,6 +1,6 @@
 [package]
 name = "edgebert"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 authors = ["Ólafur Aron Jóhannsson <olafurjohannss@gmail.com>"]
 description = "Fast local text embeddings library for Rust and WASM for BERT inference on native and edge devices with no dependencies."
@@ -9,6 +9,9 @@ license = "MIT"
 keywords = ["bert", "nlp", "wasm", "transformer", "embeddings"]
 categories = ["wasm", "text-processing", "encoding"]
 
+[features]
+default = ["openblas"]
+openblas = ["dep:blas-src", "dep:openblas-src", "ndarray/blas"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -16,33 +19,21 @@ serde_json = "1.0"
 anyhow = "1.0"
 safetensors = "0.6.2"
 wasm-bindgen = "0.2.100"
-reqwest = {  version = "0.12.23", features = ["blocking"] }
+reqwest = { version = "0.12.23", features = ["blocking", "rustls-tls"], default-features = false }
 lru = "0.16.1"
 once_cell = "1.21.3"
 
-
+# Optional BLAS dependencies
+blas-src = { version = "0.10", features = ["openblas"], optional = true }
+openblas-src = { version = "0.10", features = ["cblas", "system"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokenizers = { version = "0.15", default-features = false, features = ["onig"] }
 rayon = "1.11.0"
 dirs = "6.0.0"
 ndarray-stats = "0.6.0"
-ndarray = { version = "0.16", features = ["blas", "rayon", "matrixmultiply-threading"] }
 matrixmultiply = { version = "0.3", features = ["threading", "num_cpus", "cgemm"] }
-blas-src = { version = "0.10", features = ["openblas"] }
-openblas-src = { version = "0.10", features = ["cblas", "system"] }
-
-[lib]
-crate-type = ["cdylib", "rlib"] 
-
-[target.'cfg(not(target_arch = "wasm32"))'.build-dependencies]
-pkg-config = "0.3"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-criterion = "0.7.0"
-
-[build]
-rustflags = ["-C", "target-cpu=native"]
+ndarray = { version = "0.16", features = ["rayon", "matrixmultiply-threading"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2.100"
@@ -53,6 +44,15 @@ getrandom = { version = "0.2", features = ["js"] }
 ndarray = "0.16.1"
 futures = "0.3.31"
 console_error_panic_hook = "0.1.7"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.build-dependencies]
+pkg-config = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = "0.7.0"
 
 [profile.release]
 opt-level = 3
@@ -67,7 +67,6 @@ inherits = "release"
 [profile.dev-opt]
 inherits = "dev"
 opt-level = 2
-
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
