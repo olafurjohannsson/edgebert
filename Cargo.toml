@@ -10,7 +10,7 @@ keywords = ["bert", "nlp", "wasm", "transformer", "embeddings"]
 categories = ["wasm", "text-processing", "encoding"]
 
 [features]
-default = ["openblas"]
+default = []  # No OpenBLAS by default
 openblas = ["dep:blas-src", "dep:openblas-src", "ndarray/blas"]
 
 [dependencies]
