@@ -2,7 +2,7 @@
 
 **A pure Rust + WASM implementation for BERT inference with minimal dependencies**
 
-[![crates.io]()](https://crates.io/crates/edgebert)
+[![crates.io](https://crates.io/assets/cargo.png)](https://crates.io/crates/edgebert)
 [![docs.rs](https://docs.rs/edgebert/badge.svg)](https://docs.rs/edgebert)
 [![Rust](https://github.com/olafurjohannsson/edgebert/actions/workflows/rust.yml/badge.svg)](https://github.com/olafurjohannsson/edgebert/actions/workflows/rust.yml)
 
@@ -49,7 +49,7 @@ For server-side or desktop applications, you can use the library directly.
 **`Cargo.toml`**
 ```toml
 [dependencies]
-edgebert = "0.3.0"
+edgebert = "0.3.4"
 anyhow = "1.0"
 ```
 
