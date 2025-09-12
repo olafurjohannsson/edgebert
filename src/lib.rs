@@ -21,6 +21,9 @@ use wasm_bindgen::prelude::*;
 mod tokenizer;
 mod weights;
 use weights::ModelWeights;
+use lru::LruCache;
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
 
 #[cfg(target_arch = "wasm32")]
 pub use tokenizer::WordPieceTokenizer as ModelTokenizer;
@@ -42,6 +45,8 @@ pub struct Model {
     layer_norm_final: LayerNorm,
     config: Config,
     tokenizer: ModelTokenizer,
+    #[cfg(not(target_arch = "wasm32"))]
+    cache: Lazy<Mutex<LruCache<String, Vec<f32>>>>,
 }
 
 struct BertLayer {
@@ -90,6 +95,7 @@ pub struct Config {
     pub hidden_act: String,
     pub model_type: String,
 }
+
 
 const SQRT_2_OVER_PI: f32 = 0.7978845608_f32;
 const GELU_COEFF: f32 = 0.044715_f32;
@@ -188,6 +194,10 @@ impl Model {
             layer_norm_final,
             config,
             tokenizer,
+            #[cfg(not(target_arch = "wasm32"))]
+            cache: Lazy::new(|| Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(1000).unwrap() // Cache up to 1000 embeddings
+            ))),
         })
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -261,40 +271,105 @@ impl Model {
 
         Ok(())
     }
+
+
+    pub fn encode_batch(
+        &self,
+        batches: Vec<Vec<&str>>,
+        normalize_embeddings: bool
+    ) -> Result<Vec<Vec<Vec<f32>>>> {
+        use rayon::prelude::*;
+        
+        batches
+            .into_par_iter()
+            .map(|batch| self.encode(batch, normalize_embeddings))
+            .collect()
+    }
+
     pub fn encode(&self, texts: Vec<&str>, normalize_embeddings: bool) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
+        
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut results = vec![None; texts.len()];
+            let mut uncached_indices = Vec::new();
+            let mut uncached_texts = Vec::new();
+            
+            // Check cache
+            {
+                let mut cache = self.cache.lock().unwrap();
+                for (i, text) in texts.iter().enumerate() {
+                    let cache_key = format!("{}||{}", text, normalize_embeddings);
+                    if let Some(cached_embedding) = cache.get(&cache_key) {
+                        results[i] = Some(cached_embedding.clone());
+                    } else {
+                        uncached_indices.push(i);
+                        uncached_texts.push(*text);
+                    }
+                }
+            }
+            
+            // If all texts were cached, return immediately
+            if uncached_texts.is_empty() {
+                return Ok(results.into_iter().map(|r| r.unwrap()).collect());
+            }
+            
+            let new_embeddings = self.encode_uncached(uncached_texts, normalize_embeddings)?;
+            
+            // Store in cache and results
+            {
+                let mut cache = self.cache.lock().unwrap();
+                for (idx, embedding) in uncached_indices.iter().zip(new_embeddings) {
+                    let text = texts[*idx];
+                    let cache_key = format!("{}||{}", text, normalize_embeddings);
+                    cache.put(cache_key, embedding.clone());
+                    results[*idx] = Some(embedding);
+                }
+            }
+            
+            return Ok(results.into_iter().map(|r| r.unwrap()).collect());
+        }
+        
+        #[cfg(target_arch = "wasm32")]
+        self.encode_uncached(texts, normalize_embeddings)
+    }
+
+    fn encode_uncached(&self, texts: Vec<&str>, normalize_embeddings: bool) -> Result<Vec<Vec<f32>>> {
         #[cfg(target_arch = "wasm32")]
         let encodings = self.tokenizer.encode_batch(texts, 512)?;
-
+    
         #[cfg(not(target_arch = "wasm32"))]
         let encodings = self
             .tokenizer
             .encode_batch(texts, true)
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
-
+    
         let batch_size = encodings.len();
-
         if batch_size == 0 {
             return Ok(vec![]);
         }
-
+    
         let max_len = encodings.iter().map(|e| e.len()).max().unwrap();
-
-        // Prepare input tensors from actual tokenizer output
+    
+        // Just create the arrays directly - no buffer pool
         let mut input_ids = Array2::<f32>::zeros((batch_size, max_len));
         let mut attention_mask = Array2::<f32>::zeros((batch_size, max_len));
-
+    
+        // Fill with actual data
         for (i, encoding) in encodings.iter().enumerate() {
             let ids = encoding.get_ids();
             let mask = encoding.get_attention_mask();
-
+    
             for (j, (&id, &m)) in ids.iter().zip(mask.iter()).enumerate() {
                 input_ids[[i, j]] = id as f32;
                 attention_mask[[i, j]] = m as f32;
             }
         }
-
+    
         let embeddings = self.forward(&input_ids, &attention_mask)?;
-
+    
         let final_embeddings = if normalize_embeddings {
             let norms = embeddings.mapv(|x| x.powi(2)).sum_axis(Axis(1));
             let norms = norms.mapv(|x| x.sqrt().max(1e-12));
@@ -303,7 +378,7 @@ impl Model {
         } else {
             embeddings
         };
-
+    
         let vector: Vec<Vec<f32>> = final_embeddings
             .outer_iter()
             .map(|row| row.to_vec())
@@ -512,8 +587,6 @@ fn matmul_3d_2d(a: &Array3<f32>, b: &Array2<f32>) -> Array3<f32> {
     // iter batch dimension, multiplying each slice with the weight matrix
     #[cfg(not(target_arch = "wasm32"))]
     {
-        use ndarray::parallel::prelude::*;
-        
         if batch <= 4 {
             // Small batches: sequential
             Zip::from(c.axis_iter_mut(Axis(0)))
@@ -548,6 +621,7 @@ fn matmul_3d_2d(a: &Array3<f32>, b: &Array2<f32>) -> Array3<f32> {
 /// and normalizes them to probabilities that sum to 1.0 along the last axis.
 ///
 /// Uses numerically stable softmax: softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
+#[inline(always)]
 fn softmax(scores: &Array4<f32>) -> Array4<f32> {
     // Use parallel iteration for large batches
     let max_vals = scores.fold_axis(Axis(3), f32::NEG_INFINITY, |&acc, &x| acc.max(x));
@@ -569,6 +643,7 @@ fn softmax(scores: &Array4<f32>) -> Array4<f32> {
 ///
 /// Sets scores for padding tokens to negative infinity so they become ~0 after softmax,
 /// preventing the model from attending to padding positions.
+#[inline(always)]
 fn apply_attention_mask(mut scores: Array4<f32>, mask: &Array2<f32>) -> Array4<f32> {
     let mask_expanded = mask.clone()
         .insert_axis(Axis(1))  // [batch, 1, seq]
@@ -657,16 +732,6 @@ fn gelu(x: &mut Array3<f32>) {
 }
 
 #[inline(always)]
-fn tanh(x: f32) -> f32 {
-    // let x = x.clamp(-3.0, 3.0);
-    // let x2 = x * x;
-    // x * (27.0 + x2) / (27.0 + 9.0 * x2)
-        let x = x.max(-3.0).min(3.0);
-    // Padé approximation of tanh
-    let x2 = x * x;
-    x * (27.0 + x2) / (27.0 + 9.0 * x2)
-}
-
 fn apply_layer_norm_3d(hidden: &Array3<f32>, ln: &LayerNorm) -> Array3<f32> {
     let mean = hidden.mean_axis(Axis(2)).unwrap();
     // Calculate variance across the last dimension. Shape: [batch, seq]

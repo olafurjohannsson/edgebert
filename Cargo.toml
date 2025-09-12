@@ -1,6 +1,6 @@
 [package]
 name = "edgebert"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 authors = ["Ólafur Aron Jóhannsson <olafurjohannss@gmail.com>"]
 description = "Fast local text embeddings library for Rust and WASM for BERT inference on native and edge devices with no dependencies."
@@ -17,6 +17,8 @@ anyhow = "1.0"
 safetensors = "0.6.2"
 wasm-bindgen = "0.2.100"
 reqwest = {  version = "0.12.23", features = ["blocking"] }
+lru = "0.16.1"
+once_cell = "1.21.3"
 
 
 
@@ -69,3 +71,7 @@ opt-level = 2
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
+
+[[bin]]
+path = "bin/native.rs"
+name = "native"
