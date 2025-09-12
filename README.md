@@ -14,7 +14,6 @@ EdgeBERT is a lightweight Rust implementation of BERT inference focused on nativ
 ## Status
 - ✅ MiniLM-L6-v2 inference working
 - ✅ WASM support
-- ⚠️ Performance optimization ongoing
 - 🚧 Additional models coming soon
 
 ## Contributions
