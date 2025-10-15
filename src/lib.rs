@@ -278,12 +278,22 @@ impl Model {
         batches: Vec<Vec<&str>>,
         normalize_embeddings: bool
     ) -> Result<Vec<Vec<Vec<f32>>>> {
-        use rayon::prelude::*;
-        
-        batches
-            .into_par_iter()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            
+            batches
+                .into_par_iter()
+                .map(|batch| self.encode(batch, normalize_embeddings))
+                .collect()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            batches
+            .into_iter()
             .map(|batch| self.encode(batch, normalize_embeddings))
             .collect()
+        }
     }
 
     pub fn encode(&self, texts: Vec<&str>, normalize_embeddings: bool) -> Result<Vec<Vec<f32>>> {
@@ -723,12 +733,24 @@ fn matmul_4d(a: &Array4<f32>, b: &Array4<f32>) -> Array4<f32> {
 
 #[inline(always)]
 fn gelu(x: &mut Array3<f32>) {
-    x.par_mapv_inplace(|val| {
+    #[cfg(all(not(target_arch = "wasm32")))]
+    {
+        x.par_mapv_inplace(|val| {
         let val_squared = val * val;
         let val_cubed = val_squared * val;
         let inner = SQRT_2_OVER_PI * (val + GELU_COEFF * val_cubed);
         val * 0.5 * (1.0 + inner.tanh())
     });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        x.mapv_inplace(|val| {
+        let val_squared = val * val;
+        let val_cubed = val_squared * val;
+        let inner = SQRT_2_OVER_PI * (val + GELU_COEFF * val_cubed);
+        val * 0.5 * (1.0 + inner.tanh())
+    }); 
+    }
 }
 
 #[inline(always)]
