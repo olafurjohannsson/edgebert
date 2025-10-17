@@ -20,10 +20,10 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 mod tokenizer;
 mod weights;
-use weights::ModelWeights;
 use lru::LruCache;
-use std::sync::Mutex;
 use once_cell::sync::Lazy;
+use std::sync::Mutex;
+use weights::ModelWeights;
 
 #[cfg(target_arch = "wasm32")]
 pub use tokenizer::WordPieceTokenizer as ModelTokenizer;
@@ -45,8 +45,12 @@ pub struct Model {
     layer_norm_final: LayerNorm,
     config: Config,
     tokenizer: ModelTokenizer,
+
     #[cfg(not(target_arch = "wasm32"))]
     cache: Lazy<Mutex<LruCache<String, Vec<f32>>>>,
+
+    #[cfg(target_arch = "wasm32")]
+    buffer_pool: BufferPool,
 }
 
 struct BertLayer {
@@ -96,6 +100,48 @@ pub struct Config {
     pub model_type: String,
 }
 
+#[cfg(target_arch = "wasm32")]
+struct BufferPool {
+    input_ids: Array2<f32>,
+    attention_mask: Array2<f32>,
+    max_capacity: (usize, usize), // (batch, seq_len)
+}
+
+#[cfg(target_arch = "wasm32")]
+impl BufferPool {
+    fn new() -> Self {
+        Self {
+            input_ids: Array2::zeros((8, 512)), // Pre-allocate
+            attention_mask: Array2::zeros((8, 512)),
+            max_capacity: (8, 512),
+        }
+    }
+
+    fn get_buffers(
+        &mut self,
+        batch_size: usize,
+        seq_len: usize,
+    ) -> (&mut Array2<f32>, &mut Array2<f32>) {
+        if batch_size > self.max_capacity.0 || seq_len > self.max_capacity.1 {
+            let new_batch = batch_size.max(self.max_capacity.0);
+            let new_seq = seq_len.max(self.max_capacity.1);
+
+            self.input_ids = Array2::zeros((new_batch, new_seq));
+            self.attention_mask = Array2::zeros((new_batch, new_seq));
+            self.max_capacity = (new_batch, new_seq);
+        }
+
+        // Zero out the region we'll use
+        self.input_ids
+            .slice_mut(s![..batch_size, ..seq_len])
+            .fill(0.0);
+        self.attention_mask
+            .slice_mut(s![..batch_size, ..seq_len])
+            .fill(0.0);
+
+        (&mut self.input_ids, &mut self.attention_mask)
+    }
+}
 
 const SQRT_2_OVER_PI: f32 = 0.7978845608_f32;
 const GELU_COEFF: f32 = 0.044715_f32;
@@ -195,9 +241,13 @@ impl Model {
             config,
             tokenizer,
             #[cfg(not(target_arch = "wasm32"))]
-            cache: Lazy::new(|| Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(1000).unwrap() // Cache up to 1000 embeddings
-            ))),
+            cache: Lazy::new(|| {
+                Mutex::new(LruCache::new(
+                    std::num::NonZeroUsize::new(1000).unwrap(), // Cache up to 1000 embeddings
+                ))
+            }),
+            #[cfg(target_arch = "wasm32")]
+            buffer_pool: BufferPool::new(),
         })
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -272,114 +322,123 @@ impl Model {
         Ok(())
     }
 
-
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn encode_batch(
         &self,
         batches: Vec<Vec<&str>>,
-        normalize_embeddings: bool
+        normalize_embeddings: bool,
     ) -> Result<Vec<Vec<Vec<f32>>>> {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            use rayon::prelude::*;
-            
-            batches
-                .into_par_iter()
-                .map(|batch| self.encode(batch, normalize_embeddings))
-                .collect()
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            batches
+        use rayon::prelude::*;
+
+        batches
+            .into_par_iter()
+            .map(|batch| self.encode(batch, normalize_embeddings))
+            .collect()
+    }
+
+    // WASM version - sequential, uses &mut self with buffer pooling
+    #[cfg(target_arch = "wasm32")]
+    pub fn encode_batch(
+        &mut self,
+        batches: Vec<Vec<&str>>,
+        normalize_embeddings: bool,
+    ) -> Result<Vec<Vec<Vec<f32>>>> {
+        batches
             .into_iter()
             .map(|batch| self.encode(batch, normalize_embeddings))
             .collect()
-        }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn encode(
+        &mut self,
+        texts: Vec<&str>,
+        normalize_embeddings: bool,
+    ) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
+        self.encode_uncached(texts, normalize_embeddings)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn encode(&self, texts: Vec<&str>, normalize_embeddings: bool) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
-        
-        #[cfg(not(target_arch = "wasm32"))]
+
+        let mut results = vec![None; texts.len()];
+        let mut uncached_indices = Vec::new();
+        let mut uncached_texts = Vec::new();
+
+        // Check cache
         {
-            let mut results = vec![None; texts.len()];
-            let mut uncached_indices = Vec::new();
-            let mut uncached_texts = Vec::new();
-            
-            // Check cache
-            {
-                let mut cache = self.cache.lock().unwrap();
-                for (i, text) in texts.iter().enumerate() {
-                    let cache_key = format!("{}||{}", text, normalize_embeddings);
-                    if let Some(cached_embedding) = cache.get(&cache_key) {
-                        results[i] = Some(cached_embedding.clone());
-                    } else {
-                        uncached_indices.push(i);
-                        uncached_texts.push(*text);
-                    }
+            let mut cache = self.cache.lock().unwrap();
+            for (i, text) in texts.iter().enumerate() {
+                let cache_key = format!("{}||{}", text, normalize_embeddings);
+                if let Some(cached_embedding) = cache.get(&cache_key) {
+                    results[i] = Some(cached_embedding.clone());
+                } else {
+                    uncached_indices.push(i);
+                    uncached_texts.push(*text);
                 }
             }
-            
-            // If all texts were cached, return immediately
-            if uncached_texts.is_empty() {
-                return Ok(results.into_iter().map(|r| r.unwrap()).collect());
-            }
-            
-            let new_embeddings = self.encode_uncached(uncached_texts, normalize_embeddings)?;
-            
-            // Store in cache and results
-            {
-                let mut cache = self.cache.lock().unwrap();
-                for (idx, embedding) in uncached_indices.iter().zip(new_embeddings) {
-                    let text = texts[*idx];
-                    let cache_key = format!("{}||{}", text, normalize_embeddings);
-                    cache.put(cache_key, embedding.clone());
-                    results[*idx] = Some(embedding);
-                }
-            }
-            
+        }
+
+        if uncached_texts.is_empty() {
             return Ok(results.into_iter().map(|r| r.unwrap()).collect());
         }
-        
-        #[cfg(target_arch = "wasm32")]
-        self.encode_uncached(texts, normalize_embeddings)
+
+        let new_embeddings = self.encode_uncached(uncached_texts, normalize_embeddings)?;
+
+        // Store in cache and results
+        {
+            let mut cache = self.cache.lock().unwrap();
+            for (idx, embedding) in uncached_indices.iter().zip(new_embeddings) {
+                let text = texts[*idx];
+                let cache_key = format!("{}||{}", text, normalize_embeddings);
+                cache.put(cache_key, embedding.clone());
+                results[*idx] = Some(embedding);
+            }
+        }
+
+        Ok(results.into_iter().map(|r| r.unwrap()).collect())
     }
 
-    fn encode_uncached(&self, texts: Vec<&str>, normalize_embeddings: bool) -> Result<Vec<Vec<f32>>> {
-        #[cfg(target_arch = "wasm32")]
+    // WASM version with buffer pooling
+    #[cfg(target_arch = "wasm32")]
+    fn encode_uncached(
+        &mut self,
+        texts: Vec<&str>,
+        normalize_embeddings: bool,
+    ) -> Result<Vec<Vec<f32>>> {
         let encodings = self.tokenizer.encode_batch(texts, 512)?;
-    
-        #[cfg(not(target_arch = "wasm32"))]
-        let encodings = self
-            .tokenizer
-            .encode_batch(texts, true)
-            .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
-    
+
         let batch_size = encodings.len();
         if batch_size == 0 {
             return Ok(vec![]);
         }
-    
+
         let max_len = encodings.iter().map(|e| e.len()).max().unwrap();
-    
-        // Just create the arrays directly - no buffer pool
-        let mut input_ids = Array2::<f32>::zeros((batch_size, max_len));
-        let mut attention_mask = Array2::<f32>::zeros((batch_size, max_len));
-    
-        // Fill with actual data
+
+        // Get reusable buffers
+        let (input_ids, attention_mask) = self.buffer_pool.get_buffers(batch_size, max_len);
+
         for (i, encoding) in encodings.iter().enumerate() {
             let ids = encoding.get_ids();
             let mask = encoding.get_attention_mask();
-    
+
             for (j, (&id, &m)) in ids.iter().zip(mask.iter()).enumerate() {
                 input_ids[[i, j]] = id as f32;
                 attention_mask[[i, j]] = m as f32;
             }
         }
-    
-        let embeddings = self.forward(&input_ids, &attention_mask)?;
-    
+
+        let input_ids_slice = input_ids.slice(s![..batch_size, ..max_len]).to_owned();
+        let attention_mask_slice = attention_mask.slice(s![..batch_size, ..max_len]).to_owned();
+
+        let embeddings = self.forward(&input_ids_slice, &attention_mask_slice)?;
+
         let final_embeddings = if normalize_embeddings {
             let norms = embeddings.mapv(|x| x.powi(2)).sum_axis(Axis(1));
             let norms = norms.mapv(|x| x.sqrt().max(1e-12));
@@ -388,7 +447,56 @@ impl Model {
         } else {
             embeddings
         };
-    
+
+        let vector: Vec<Vec<f32>> = final_embeddings
+            .outer_iter()
+            .map(|row| row.to_vec())
+            .collect();
+        Ok(vector)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn encode_uncached(
+        &self,
+        texts: Vec<&str>,
+        normalize_embeddings: bool,
+    ) -> Result<Vec<Vec<f32>>> {
+        let encodings = self
+            .tokenizer
+            .encode_batch(texts, true)
+            .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
+
+        let batch_size = encodings.len();
+        if batch_size == 0 {
+            return Ok(vec![]);
+        }
+
+        let max_len = encodings.iter().map(|e| e.len()).max().unwrap();
+
+        let mut input_ids = Array2::<f32>::zeros((batch_size, max_len));
+        let mut attention_mask = Array2::<f32>::zeros((batch_size, max_len));
+
+        for (i, encoding) in encodings.iter().enumerate() {
+            let ids = encoding.get_ids();
+            let mask = encoding.get_attention_mask();
+
+            for (j, (&id, &m)) in ids.iter().zip(mask.iter()).enumerate() {
+                input_ids[[i, j]] = id as f32;
+                attention_mask[[i, j]] = m as f32;
+            }
+        }
+
+        let embeddings = self.forward(&input_ids, &attention_mask)?;
+
+        let final_embeddings = if normalize_embeddings {
+            let norms = embeddings.mapv(|x| x.powi(2)).sum_axis(Axis(1));
+            let norms = norms.mapv(|x| x.sqrt().max(1e-12));
+            let norms_expanded = norms.insert_axis(Axis(1));
+            embeddings / &norms_expanded
+        } else {
+            embeddings
+        };
+
         let vector: Vec<Vec<f32>> = final_embeddings
             .outer_iter()
             .map(|row| row.to_vec())
@@ -408,7 +516,8 @@ impl Model {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use ndarray::parallel::prelude::*;
-            hidden.axis_iter_mut(Axis(0))
+            hidden
+                .axis_iter_mut(Axis(0))
                 .into_par_iter()
                 .zip(input_ids.axis_iter(Axis(0)))
                 .for_each(|(mut hidden_slice, ids)| {
@@ -428,7 +537,7 @@ impl Model {
                 }
             }
         }
-        
+
         let pos_embeddings = self.position_embeddings.slice(s![0..seq_len, ..]);
         hidden += &pos_embeddings;
 
@@ -517,7 +626,7 @@ impl FeedForward {
     fn forward(&self, hidden: &Array3<f32>) -> Result<Array3<f32>> {
         let mut intermediate = matmul_3d_2d(hidden, &self.dense1_weight_t);
         intermediate += &self.dense1_bias; // in place mutation, no allocation
-        
+
         gelu(&mut intermediate);
 
         let mut output = matmul_3d_2d(&intermediate, &self.dense2_weight_t);
@@ -636,13 +745,13 @@ fn softmax(scores: &Array4<f32>) -> Array4<f32> {
     // Use parallel iteration for large batches
     let max_vals = scores.fold_axis(Axis(3), f32::NEG_INFINITY, |&acc, &x| acc.max(x));
     let max_expanded = max_vals.insert_axis(Axis(3));
-    
+
     // Fuse operations to reduce memory access
     let mut result = scores - &max_expanded;
     result.mapv_inplace(f32::exp);
-    
+
     let sum_exp = result.sum_axis(Axis(3)).insert_axis(Axis(3));
-    result /= &sum_exp;  // More efficient than multiplication by reciprocal for ndarray
+    result /= &sum_exp; // More efficient than multiplication by reciprocal for ndarray
     result
 }
 
@@ -655,10 +764,11 @@ fn softmax(scores: &Array4<f32>) -> Array4<f32> {
 /// preventing the model from attending to padding positions.
 #[inline(always)]
 fn apply_attention_mask(mut scores: Array4<f32>, mask: &Array2<f32>) -> Array4<f32> {
-    let mask_expanded = mask.clone()
-        .insert_axis(Axis(1))  // [batch, 1, seq]
-        .insert_axis(Axis(2));  // [batch, 1, 1, seq]
-    
+    let mask_expanded = mask
+        .clone()
+        .insert_axis(Axis(1)) // [batch, 1, seq]
+        .insert_axis(Axis(2)); // [batch, 1, 1, seq]
+
     if let Some(broadcast_mask) = mask_expanded.broadcast(scores.dim()) {
         Zip::from(&mut scores)
             .and(&broadcast_mask)
@@ -736,20 +846,20 @@ fn gelu(x: &mut Array3<f32>) {
     #[cfg(all(not(target_arch = "wasm32")))]
     {
         x.par_mapv_inplace(|val| {
-        let val_squared = val * val;
-        let val_cubed = val_squared * val;
-        let inner = SQRT_2_OVER_PI * (val + GELU_COEFF * val_cubed);
-        val * 0.5 * (1.0 + inner.tanh())
-    });
+            let val_squared = val * val;
+            let val_cubed = val_squared * val;
+            let inner = SQRT_2_OVER_PI * (val + GELU_COEFF * val_cubed);
+            val * 0.5 * (1.0 + inner.tanh())
+        });
     }
     #[cfg(target_arch = "wasm32")]
     {
         x.mapv_inplace(|val| {
-        let val_squared = val * val;
-        let val_cubed = val_squared * val;
-        let inner = SQRT_2_OVER_PI * (val + GELU_COEFF * val_cubed);
-        val * 0.5 * (1.0 + inner.tanh())
-    }); 
+            let val_squared = val * val;
+            let val_cubed = val_squared * val;
+            let inner = SQRT_2_OVER_PI * (val + GELU_COEFF * val_cubed);
+            val * 0.5 * (1.0 + inner.tanh())
+        });
     }
 }
 
@@ -929,7 +1039,7 @@ impl WasmModel {
     }
 
     #[wasm_bindgen]
-    pub fn encode(&self, texts: Vec<String>, normalize: bool) -> Result<Vec<f32>, JsValue> {
+    pub fn encode(&mut self, texts: Vec<String>, normalize: bool) -> Result<Vec<f32>, JsValue> {
         let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let embeddings = self
             .inner
