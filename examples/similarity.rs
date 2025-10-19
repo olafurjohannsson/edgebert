@@ -5,7 +5,7 @@ fn main() -> Result<()> {
     let model = Model::from_pretrained(ModelType::MiniLML6V2BiEncoder)?;
 
     let texts = vec!["Hello world", "How are you?", "Goodbye world"];
-    let embeddings = model.encode(texts.clone(), false)?; // normalize=false
+    let embeddings = model.encode(texts.clone(), true)?; // normalize=false
 
     for (i, embedding) in embeddings.iter().enumerate() {
         let norm: f32 = embedding.iter().map(|x| x*x).sum::<f32>().sqrt();

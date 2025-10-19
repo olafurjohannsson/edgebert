@@ -1,4 +1,4 @@
-import init, { WasmModel, WasmModelType } from './pkg/edgebert.js';
+import init, { WasmModel, WasmModelType } from './pkg/index.js';
 
 let model = null;
 
