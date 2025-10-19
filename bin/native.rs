@@ -2,7 +2,7 @@ use std::time::Instant;
 use anyhow::Result;
 use edgebert::{Model, ModelType};
 fn main() -> Result<()> {
-    let model = Model::from_pretrained(ModelType::MiniLML6V2)?;
+    let model = Model::from_pretrained(ModelType::MiniLML6V2BiEncoder)?;
     let texts: Vec<String> = (0..100).map(|i| format!("Hello world {}", i)).collect();
     let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
     // Warm-up

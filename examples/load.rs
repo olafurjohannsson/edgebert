@@ -16,7 +16,7 @@ fn chunk_text(text: &str, chunk_size: usize) -> Vec<&str> {
 }
 
 fn main() -> Result<()> {
-    let model = Model::from_pretrained(ModelType::MiniLML6V2)?;
+    let model = Model::from_pretrained(ModelType::MiniLML6V2BiEncoder)?;
     let chunks = chunk_text(&LONG_TEXT, 512);
     println!("Total chunks: {}", chunks.len());
     let values = chunks.iter().map(|s| *s).collect();

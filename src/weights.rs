@@ -2,8 +2,8 @@ use crate::Config;
 use anyhow::Result;
 use ndarray::{Array1, Array2};
 use safetensors::SafeTensors;
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 
 pub struct ModelWeights {
     tensors: HashMap<String, Vec<f32>>,
@@ -94,5 +94,25 @@ impl ModelWeights {
             shapes,
             config,
         })
+    }
+
+    pub fn get_scalar(&self, name: &str) -> Result<f32> {
+        let data = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("Tensor {} not found", name))?;
+
+        anyhow::ensure!(
+            data.len() == 1,
+            "Expected scalar, got {} elements",
+            data.len()
+        );
+        Ok(data[0])
+    }
+
+    // Support for cross-encoder and bi-encoder
+    pub fn is_cross_encoder(&self) -> bool {
+        self.tensors.contains_key("classifier.weight")
+            || self.tensors.contains_key("classifier.dense.weight")
     }
 }

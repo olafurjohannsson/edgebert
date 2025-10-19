@@ -33,7 +33,8 @@ use tokenizers::Tokenizer as ModelTokenizer;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ModelType {
-    MiniLML6V2,
+    MiniLML6V2BiEncoder,
+    MiniLML6V2CrossEncoder,
 }
 
 #[wasm_bindgen]
@@ -51,6 +52,10 @@ pub struct Model {
 
     #[cfg(target_arch = "wasm32")]
     buffer_pool: BufferPool,
+
+    classifier_weight: Option<Array1<f32>>,
+    classifier_bias: Option<f32>,
+    is_cross_encoder: bool,
 }
 
 struct BertLayer {
@@ -248,8 +253,12 @@ impl Model {
             }),
             #[cfg(target_arch = "wasm32")]
             buffer_pool: BufferPool::new(),
+            classifier_bias: None,
+            classifier_weight: None,
+            is_cross_encoder: false,
         })
     }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_pretrained(model_type: ModelType) -> Result<Self> {
         let cache_dir = dirs::cache_dir()
@@ -258,12 +267,40 @@ impl Model {
 
         fs::create_dir_all(&cache_dir)?;
 
-        let model_path = match model_type {
-            ModelType::MiniLML6V2 => cache_dir.join("all-MiniLM-L6-v2"),
+        let (model_path, is_cross_encoder) = match model_type {
+            ModelType::MiniLML6V2BiEncoder => (cache_dir.join("all-MiniLM-L6-v2"), false),
+            ModelType::MiniLML6V2CrossEncoder => (cache_dir.join("ms-marco-MiniLM-L-6-v2"), true),
         };
 
         Self::ensure_model_files(model_type, &model_path)?;
-        Self::from_pretrained_path(model_path.to_str().unwrap())
+
+        // Load based on type
+        if is_cross_encoder {
+            Self::from_cross_encoder_path(model_path.to_str().unwrap())
+        } else {
+            Self::from_pretrained_path(model_path.to_str().unwrap())
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn from_cross_encoder_path(model_path: &str) -> Result<Self> {
+        let model_path = Path::new(model_path);
+
+        let weights = ModelWeights::load(model_path)?;
+        let tokenizer_file = model_path.join("tokenizer.json");
+        let config = weights.config.clone();
+
+        let mut tokenizer = ModelTokenizer::from_file(tokenizer_file)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+
+        if let Some(padding) = tokenizer.get_padding_mut() {
+            padding.strategy = tokenizers::PaddingStrategy::BatchLongest;
+        }
+        if let Some(truncation) = tokenizer.get_truncation_mut() {
+            truncation.max_length = 512;
+        }
+
+        Self::from_cross_encoder_weights(weights, tokenizer, config)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -287,19 +324,96 @@ impl Model {
         Self::from_weights(weights, tokenizer, config)
     }
 
+    pub fn score_pair(&mut self, query: &str, document: &str) -> Result<f32> {
+        if !self.is_cross_encoder {
+            anyhow::bail!("Model is not a cross-encoder");
+        }
+
+        let combined = format!("{} [SEP] {}", query, document);
+
+        #[cfg(target_arch = "wasm32")]
+        let encodings = self.tokenizer.encode_batch(vec![combined.as_str()], 512)?;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let encodings = self
+            .tokenizer
+            .encode_batch(vec![combined.as_str()], true)
+            .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
+
+        let batch_size = 1;
+        let seq_len = encodings[0].len();
+
+        let mut input_ids = Array2::<f32>::zeros((batch_size, seq_len));
+        let mut attention_mask = Array2::<f32>::zeros((batch_size, seq_len));
+
+        for (j, (&id, &m)) in encodings[0]
+            .get_ids()
+            .iter()
+            .zip(encodings[0].get_attention_mask().iter())
+            .enumerate()
+        {
+            input_ids[[0, j]] = id as f32;
+            attention_mask[[0, j]] = m as f32;
+        }
+
+        // Forward pass - returns [batch_size, hidden_size]
+        let pooled = self.forward(&input_ids, &attention_mask)?;
+
+        // pooled shape is [1, hidden_size], we want [hidden_size]
+        let cls_output: Array1<f32> = pooled.row(0).to_owned();
+
+        // Apply classifier head
+        let weight = self
+            .classifier_weight
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Classifier weight not loaded"))?;
+        let bias = self
+            .classifier_bias
+            .ok_or_else(|| anyhow::anyhow!("Classifier bias not loaded"))?;
+
+        // Explicit type annotation to resolve ambiguity
+        let logit: f32 = cls_output.dot(weight) + bias;
+
+        Ok(logit)
+    }
+
+    /// Batch scoring for efficiency
+    pub fn score_batch(&mut self, pairs: Vec<(&str, &str)>) -> Result<Vec<f32>> {
+        pairs.iter().map(|(q, d)| self.score_pair(q, d)).collect()
+    }
+
+    pub fn from_cross_encoder_weights(
+        weights: ModelWeights,
+        tokenizer: ModelTokenizer,
+        config: Config,
+    ) -> Result<Self> {
+        let classifier_weight = weights.get_array1("classifier.weight")?;
+        let classifier_bias = weights.get_scalar("classifier.bias")?;
+
+        let mut model = Self::from_weights(weights, tokenizer, config)?;
+
+        // Load classifier head
+        model.classifier_weight = Some(classifier_weight);
+        model.classifier_bias = Some(classifier_bias);
+        model.is_cross_encoder = true;
+
+        Ok(model)
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
-    fn ensure_model_files(model_id: ModelType, model_path: &Path) -> Result<()> {
-        let (weights_url, tokenizer_url, config_url, weights_file, tokenizer_file, config_file) =
-            match model_id {
-                ModelType::MiniLML6V2 => (
-                    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors",
-                    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
-                    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json",
-                    model_path.join("model.safetensors"),
-                    model_path.join("tokenizer.json"),
-                    model_path.join("config.json"),
-                ),
-            };
+    fn ensure_model_files(model_type: ModelType, model_path: &Path) -> Result<()> {
+        let (weights_url, tokenizer_url, config_url) = match model_type {
+            ModelType::MiniLML6V2BiEncoder => (
+                "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors",
+                "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+                "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json",
+            ),
+            ModelType::MiniLML6V2CrossEncoder => (
+                "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/model.safetensors",
+                "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/tokenizer.json",
+                "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/config.json",
+            ),
+        };
 
         fs::create_dir_all(model_path)?;
 
@@ -315,9 +429,9 @@ impl Model {
             Ok(())
         };
 
-        download(weights_url, &weights_file)?;
-        download(tokenizer_url, &tokenizer_file)?;
-        download(config_url, &config_file)?;
+        download(weights_url, &model_path.join("model.safetensors"))?;
+        download(tokenizer_url, &model_path.join("tokenizer.json"))?;
+        download(config_url, &model_path.join("config.json"))?;
 
         Ok(())
     }
@@ -910,14 +1024,16 @@ pub fn init() {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub enum WasmModelType {
-    MiniLML6V2,
+    MiniLML6V2BiEncoder,
+    MiniLML6V2CrossEncoder,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl From<WasmModelType> for ModelType {
     fn from(wasm_type: WasmModelType) -> Self {
         match wasm_type {
-            WasmModelType::MiniLML6V2 => ModelType::MiniLML6V2,
+            WasmModelType::MiniLML6V2BiEncoder => ModelType::MiniLML6V2BiEncoder,
+            WasmModelType::MiniLML6V2CrossEncoder => ModelType::MiniLML6V2CrossEncoder,
         }
     }
 }
@@ -1012,15 +1128,22 @@ impl WasmModel {
 
         Ok(WasmModel { inner: model })
     }
+
     #[wasm_bindgen]
     pub async fn from_type(model_type: WasmModelType) -> Result<WasmModel, JsValue> {
-        let (weights_url, config_url, tokenizer_url) = match model_type {
-            WasmModelType::MiniLML6V2 => (
+        let (weights_url, config_url, tokenizer_url, is_cross_encoder) = match model_type {
+            WasmModelType::MiniLML6V2BiEncoder => (
                 "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors",
                 "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json",
                 "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+                false,
             ),
-            // add more models here
+            WasmModelType::MiniLML6V2CrossEncoder => (
+                "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/model.safetensors",
+                "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/config.json",
+                "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/tokenizer.json",
+                true,
+            ),
         };
 
         let (weights, config, tokenizer) = futures::future::join3(
@@ -1034,8 +1157,12 @@ impl WasmModel {
         let config = config.map_err(|e| JsValue::from_str(&e))?;
         let tokenizer = tokenizer.map_err(|e| JsValue::from_str(&e))?;
 
-        let model = WasmModel::new(&weights, &config, &tokenizer)?;
-        Ok(model)
+        // Use appropriate constructor
+        if is_cross_encoder {
+            WasmModel::new_cross_encoder(&weights, &config, &tokenizer)
+        } else {
+            WasmModel::new(&weights, &config, &tokenizer)
+        }
     }
 
     #[wasm_bindgen]
@@ -1049,6 +1176,57 @@ impl WasmModel {
         let vector: Vec<f32> = embeddings.into_iter().flatten().collect();
 
         Ok(vector)
+    }
+
+    #[wasm_bindgen]
+    pub fn new_cross_encoder(
+        weights_data: &[u8],
+        config_json: &str,
+        tokenizer_json: &str,
+    ) -> Result<WasmModel, JsValue> {
+        use crate::tokenizer::WordPieceTokenizer;
+
+        let weights = ModelWeights::from_bytes(weights_data, config_json)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let tokenizer = WordPieceTokenizer::from_json_str(tokenizer_json)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let config: Config =
+            serde_json::from_str(config_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let model = Model::from_cross_encoder_weights(weights, tokenizer, config)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        Ok(WasmModel { inner: model })
+    }
+    #[wasm_bindgen]
+    pub fn score(&mut self, query: String, document: String) -> Result<f32, JsValue> {
+        self.inner
+            .score_pair(&query, &document)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+    #[wasm_bindgen]
+    pub fn score_batch(
+        &mut self,
+        queries: Vec<String>,
+        documents: Vec<String>,
+    ) -> Result<Vec<f32>, JsValue> {
+        if queries.len() != documents.len() {
+            return Err(JsValue::from_str(
+                "queries and documents must have same length",
+            ));
+        }
+
+        let pairs: Vec<(&str, &str)> = queries
+            .iter()
+            .zip(documents.iter())
+            .map(|(q, d)| (q.as_str(), d.as_str()))
+            .collect();
+
+        self.inner
+            .score_batch(pairs)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
 
@@ -1071,7 +1249,7 @@ mod tests {
     }
     #[test]
     fn test_model_encode_and_cosine_similarity() -> Result<()> {
-        let model = Model::from_pretrained(ModelType::MiniLML6V2)?;
+        let model = Model::from_pretrained(ModelType::MiniLML6V2BiEncoder)?;
         let texts = vec!["Hello world", "Hello world", "Goodbye world"];
         let embeddings = model.encode(texts.clone(), true)?;
         let sim_00 = cosine_similarity(&embeddings[0], &embeddings[0]);

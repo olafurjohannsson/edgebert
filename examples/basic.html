@@ -6,12 +6,12 @@
 </head>
 <body>
 <script type="module">
-    import init, { WasmModel, WasmModelType } from './pkg/edgebert.js';
+    import init, { WasmModel, WasmModelType } from './pkg/index.js';
 
     async function run() {
         await init();
 
-        const model = await WasmModel.from_type(WasmModelType.MiniLML6V2);
+        const model = await WasmModel.from_type(WasmModelType.MiniLML6V2BiEncoder);
         const texts = ["Hello world", "How are you"];
         const embeddings = model.encode(texts, true);
 

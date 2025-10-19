@@ -2,7 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use edgebert::{Model, ModelType};
 
 fn benchmark_edgebert(c: &mut Criterion) {
-    let model = Model::from_pretrained(ModelType::MiniLML6V2).unwrap();
+    let model = Model::from_pretrained(ModelType::MiniLML6V2BiEncoder).unwrap();
     let texts: Vec<&str> = vec!["Hello world"; 100];
 
     c.bench_function("edgebert_100_texts", |b| {

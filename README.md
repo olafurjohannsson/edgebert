@@ -56,7 +56,7 @@ anyhow = "1.0"
 use anyhow::Result;
 use edgebert::{Model, ModelType};
 fn main() -> Result<()> {
-    let model = Model::from_pretrained(ModelType::MiniLML6V2)?;
+    let model = Model::from_pretrained(ModelType::MiniLML6V2BiEncoder)?;
 
     let texts = vec!["Hello world", "How are you"];
     let embeddings = model.encode(texts.clone(), true)?;
@@ -107,7 +107,7 @@ cd examples && npx serve
     async function run() {
         await init();
 
-        const model = await WasmModel.from_type(WasmModelType.MiniLML6V2);
+        const model = await WasmModel.from_type(WasmModelType.MiniLML6V2BiEncoder);
         const texts = ["Hello world", "How are you"];
         const embeddings = model.encode(texts, true);
 
@@ -188,7 +188,7 @@ use anyhow::Result;
 use edgebert::{Model, ModelType};
 
 fn main() -> Result<()> {
-    let model = Model::from_pretrained(ModelType::MiniLML6V2)?;
+    let model = Model::from_pretrained(ModelType::MiniLML6V2BiEncoder)?;
     let texts = vec!["Hello world", "How are you"];
     let embeddings = model.encode(texts.clone(), true)?;
 

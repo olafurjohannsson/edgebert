@@ -2,7 +2,7 @@ use anyhow::Result;
 use edgebert::{Model, ModelType, cosine_similarity};
 
 fn main() -> Result<()> {
-    let model = Model::from_pretrained(ModelType::MiniLML6V2)?;
+    let model = Model::from_pretrained(ModelType::MiniLML6V2BiEncoder)?;
 
     let texts = vec!["Hello world", "How are you?", "Goodbye world"];
     let embeddings = model.encode(texts.clone(), false)?; // normalize=false
