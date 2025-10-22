@@ -1,8 +1,8 @@
 
 use anyhow::Result;
-use edgebert::{BertModel, ModelType};
+use edgebert::{BertModel, BertModelType};
 fn main() -> Result<()> {
-    let model = BertModel::from_pretrained(ModelType::MiniLML6V2BiEncoder)?;
+    let model = BertModel::from_pretrained(BertModelType::MiniLML6V2BiEncoder)?;
 
     let texts = vec!["Hello world", "How are you"];
     let embeddings = model.encode(texts.clone(), true)?;

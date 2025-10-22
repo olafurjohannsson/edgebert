@@ -12,7 +12,7 @@ pub mod wasm;
 
 // Re-exports
 pub use config::BertConfig;
-pub use model::{BertModel, ModelType};
+pub use model::{bert::BertModel, bert::BertModelType};
 pub use weights::ModelWeights;
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -1,7 +1,7 @@
 
 use std::time::Instant;
 use anyhow::Result;
-use edgebert::{BertModel, ModelType, cosine_similarity};
+use edgebert::{BertModel, BertModelType, cosine_similarity};
 fn chunk_text(text: &str, chunk_size: usize) -> Vec<&str> {
     let mut chunks = Vec::new();
     let mut start = 0;
@@ -16,7 +16,7 @@ fn chunk_text(text: &str, chunk_size: usize) -> Vec<&str> {
 }
 
 fn main() -> Result<()> {
-    let model = BertModel::from_pretrained(ModelType::MiniLML6V2BiEncoder)?;
+    let model = BertModel::from_pretrained(BertModelType::MiniLML6V2BiEncoder)?;
     let chunks = chunk_text(&LONG_TEXT, 512);
     println!("Total chunks: {}", chunks.len());
     let values = chunks.iter().map(|s| *s).collect();

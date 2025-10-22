@@ -2,9 +2,11 @@
 //! 
 //! Provides autoregressive language models for text generation.
 
-pub mod config;
+pub mod gptconfig;
+pub mod bertconfig;
 pub mod model;
-pub mod weights;
+pub mod gptweights;
+pub mod bertweights;
 pub mod tokenizer;
 pub mod generation;
 
@@ -12,9 +14,9 @@ pub mod generation;
 pub mod wasm;
 
 // Re-exports
-pub use config::GPTConfig;
-pub use model::{GenerativeModel, ModelType};
-pub use weights::ModelWeights;
+pub use gptconfig::GPTConfig;
+pub use model::{GenerativeModel, GenerativeModelType};
+pub use gptweights::GPTModelWeights;
 pub use generation::{GenerationConfig, SamplingStrategy};
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -3,8 +3,8 @@
 use anyhow::Result;
 use ndarray::{Array1, Array2, Array3, Array4, s};
 use edgetransformers::{LayerNorm, FeedForward};
-use crate::config::GPTConfig;
-use crate::weights::ModelWeights;
+use crate::gptconfig::GPTConfig;
+use crate::gptweights::GPTModelWeights;
 
 /// GPT block containing attention and feedforward
 pub struct GPTBlock {
@@ -166,7 +166,7 @@ pub struct GPTBase {
 }
 
 impl GPTBase {
-    pub fn from_weights(weights: &ModelWeights, config: GPTConfig) -> Result<Self> {
+    pub fn from_weights(weights: &GPTModelWeights, config: GPTConfig) -> Result<Self> {
         // Load embeddings
         let wte = weights.get_array2("transformer.wte.weight")?;
         let wpe = weights.get_array2("transformer.wpe.weight")?;

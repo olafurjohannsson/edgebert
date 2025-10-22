@@ -10,7 +10,7 @@ use std::num::NonZeroUsize;
 use edgetransformers::pooling::mean_pool;
 use crate::config::BertConfig;
 use crate::weights::ModelWeights;
-use crate::model::base::BertBase;
+use crate::model::bertbase::BertBase;
 
 #[cfg(not(target_arch = "wasm32"))]
 use tokenizers::Tokenizer;

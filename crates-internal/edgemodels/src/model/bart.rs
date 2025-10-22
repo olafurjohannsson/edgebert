@@ -1,7 +1,7 @@
 //! BART Encoder-Decoder model implementations
 
-use crate::config::BartConfig;
-use crate::ModelWeights;
+use crate::gptconfig::BartConfig;
+use crate::gptweights::GPTModelWeights;
 use anyhow::Result;
 use ndarray::{s, Array2, Array3, Array4, Axis};
 
@@ -172,7 +172,7 @@ pub struct BartModel {
 
 impl BartModel {
     pub fn from_weights(
-        weights: &ModelWeights,
+        weights: &GPTModelWeights,
         config: BartConfig,
         tokenizer: Tokenizer,
     ) -> Result<Self> {

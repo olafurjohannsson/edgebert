@@ -1,6 +1,6 @@
 //! BART summarization example
 use anyhow::Result;
-use edgemodels::{GenerationConfig, GenerativeModel, ModelType};
+use edgemodels::{GenerationConfig, GenerativeModel, GenerativeModelType};
 use edgetransformers::wgpu_context::WgpuContext;
 
 fn main() -> Result<()> {
@@ -8,7 +8,7 @@ fn main() -> Result<()> {
     
     let context = pollster::block_on(WgpuContext::new());
 
-    let model = GenerativeModel::from_pretrained(ModelType::DistilBartCnn12_6)?;
+    let model = GenerativeModel::from_pretrained(GenerativeModelType::DistilBartCnn12_6)?;
 
     let article_text = "The Apollo 11 mission was the first manned mission to land on the Moon. \
     The mission, carried out by NASA, took place in July 1969. The three astronauts \

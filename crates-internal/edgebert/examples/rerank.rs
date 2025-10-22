@@ -1,5 +1,5 @@
 use anyhow::Result;
-use edgebert::{cosine_similarity, BertModel, ModelType};
+use edgebert::{cosine_similarity, BertModel, BertModelType};
 
 fn main() -> Result<()> {
     let query = "What is the capital of France?";
@@ -15,7 +15,7 @@ fn main() -> Result<()> {
     println!("Query: \"{}\"\n", query);
 
     println!("Retrieving candidates with Bi-Encoder");
-    let bi_encoder = BertModel::from_pretrained(ModelType::MiniLML6V2BiEncoder)?;
+    let bi_encoder = BertModel::from_pretrained(BertModelType::MiniLML6V2BiEncoder)?;
     let query_embedding = bi_encoder.encode(vec![query], true)?[0].clone();
     let doc_embeddings = bi_encoder.encode(documents.clone(), true)?;
 
@@ -44,7 +44,7 @@ fn main() -> Result<()> {
 
     println!("\n Reranking top candidates with Cross-Encoder");
 
-    let mut cross_encoder = BertModel::from_pretrained(ModelType::MiniLML6V2CrossEncoder)?;
+    let mut cross_encoder = BertModel::from_pretrained(BertModelType::MiniLML6V2CrossEncoder)?;
     let pairs: Vec<(&str, &str)> = candidates.iter().map(|doc| (query, doc.as_str())).collect();
     let new_scores = cross_encoder.score_batch(pairs)?;
     let mut reranked_results: Vec<(String, f32)> =

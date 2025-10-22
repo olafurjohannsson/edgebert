@@ -1,13 +1,13 @@
 //! Streaming text generation example
 
 use anyhow::Result;
-use edgemodels::{GenerativeModel, ModelType, GenerationConfig};
+use edgemodels::{GenerativeModel, GenerativeModelType, GenerationConfig};
 use edgemodels::generation::{generate_text_streaming};
 use std::io::{self, Write};
 
 fn main() -> Result<()> {
     println!("Loading DistilGPT2 model...");
-    let model = match GenerativeModel::from_pretrained(ModelType::DistilGPT2)? {
+    let model = match GenerativeModel::from_pretrained(GenerativeModelType::DistilGPT2)? {
         GenerativeModel::DistilGPT2(m) => m,
         _ => panic!("Expected DistilGPT2"),
     };

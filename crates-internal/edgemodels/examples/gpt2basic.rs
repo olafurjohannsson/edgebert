@@ -1,9 +1,9 @@
 //! Basic text generation example
 use anyhow::Result;
-use edgemodels::{ModelType, GenerativeModel};
+use edgemodels::{GenerativeModelType, GenerativeModel};
 
 fn main() -> Result<()> {
-    let model = GenerativeModel::from_pretrained(ModelType::DistilGPT2)?;
+    let model = GenerativeModel::from_pretrained(GenerativeModelType::DistilGPT2)?;
     println!("DistilGPT2");
     println!("Input text: {}", "Once upon a time in a land far, far away,");
     model.generate(

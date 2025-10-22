@@ -4,7 +4,7 @@ use anyhow::Result;
 use ndarray::{Array1, Array2};
 
 use crate::config::BertConfig;
-use crate::model::base::BertBase;
+use crate::model::bertbase::BertBase;
 use crate::weights::ModelWeights;
 use edgetransformers::pooling::cls_pool;
 

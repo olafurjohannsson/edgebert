@@ -1,8 +1,8 @@
 //! GPT-2 model implementation
 
 use anyhow::Result;
-use crate::config::GPTConfig;
-use crate::weights::ModelWeights;
+use crate::gptconfig::GPTConfig;
+use crate::gptweights::GPTModelWeights;
 use crate::model::gptbase::GPTBase;
 use crate::generation::{GenerationConfig, generate_text};
 
@@ -20,7 +20,7 @@ pub struct GPT2 {
 
 impl GPT2 {
     pub fn from_weights(
-        weights: ModelWeights,
+        weights: GPTModelWeights,
         tokenizer: Tokenizer,
         config: GPTConfig,
     ) -> Result<Self> {
