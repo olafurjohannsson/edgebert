@@ -44,7 +44,7 @@ impl BartEncoderLayer {
             .self_attn_layer_norm
             .forward_3d(&hidden_states_after_attn);
         let residual = &hidden_states_after_attn_ln;
-        let ffn_output = self.ffn.forward_gpu(residual, context).await?;
+        let ffn_output = self.ffn.forward_gpu2(residual, context).await?;
         let hidden_states_before_norm = residual + &ffn_output;
         let final_hidden_states = self.ffn_layer_norm.forward_3d(&hidden_states_before_norm);
 

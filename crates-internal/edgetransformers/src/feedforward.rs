@@ -1,7 +1,7 @@
 //! Feed-forward network implementation
 
 use crate::activations::gelu;
-use crate::utils::linear_algebra::{matmul_3d_2d, matmul_3d_2d_gpu};
+use crate::utils::linear_algebra::{matmul_3d_2d, matmul_3d_2d_gpu, feed_forward_gpu};
 use crate::wgpu_context::WgpuContext;
 use anyhow::Result;
 use ndarray::{Array1, Array2, Array3};
@@ -52,14 +52,21 @@ impl FeedForward {
         Ok(output)
     }
 
-    // pub async fn forward_gpu2(
-    //     &self,
-    //     hidden: &Array3<f32>,
-    //     context: &WgpuContext,
-    // ) -> Result<Array3<f32>> {
-    //     let ffn_output = wgpu_feed_forward(context, residual, &self.ffn).await;
-    //     Ok(output)
-    // }
+    pub async fn forward_gpu2(
+        &self,
+        hidden: &Array3<f32>,
+        context: &WgpuContext,
+    ) -> Result<Array3<f32>> {
+        let output = feed_forward_gpu(
+            context,
+            hidden,
+            &self.dense1_weight_t,
+            &self.dense1_bias,
+            &self.dense2_weight_t,
+            &self.dense2_bias,
+        ).await;
+        Ok(output)
+    }
 
     pub async fn forward_gpu(
         &self,

@@ -1,5 +1,8 @@
 //! WASM bindings for GPT models
 
+pub mod fetch_utils;
+pub mod errors;
+
 use wasm_bindgen::prelude::*;
 use crate::{ModelType, GPTConfig, GenerationConfig, SamplingStrategy};
 use crate::model::distilgpt2::DistilGPT2;
