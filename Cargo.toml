@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    #"crates/edgegpt",          
+    "crates-internal/edgetransformers", 
+    "crates-internal/edgebert",         
+    "crates-internal/edgesearch",      
+    "crates-internal/edgemodels",      
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Ólafur Aron Jóhannsson <olafurjohannss@gmail.com>"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/olafurjohannsson/edgegpt"
+keywords = ["ai", "llm", "transformer", "bert", "gpt", "wgpu"]
+categories = ["science", "text-processing"]
+
+[workspace.dependencies]
+anyhow = "1.0"
+ndarray = { version = "0.15", features = ["blas"] } # Enable BLAS for high-performance CPU
+openblas-src = { version = "0.10", features = ["cblas"] } # Example BLAS provider
+half = "2.2.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+safetensors = "0.4"
+tokenizers = { version = "0.15", default-features = false, features = ["onig"] }
+
+
+wgpu = "0.18"
+pollster = "0.3"
+bytemuck = { version = "1.14", features = ["derive"] }
+futures-intrusive = "0.5"
