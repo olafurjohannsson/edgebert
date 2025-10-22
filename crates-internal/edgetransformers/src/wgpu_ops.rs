@@ -44,7 +44,7 @@ async fn wgpu_matmul_2d(context: &WgpuContext, a: &Array2<f32>, b: &Array2<f32>)
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Matmul Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/matmul.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/matmul_tiled.wgsl").into()),
         });
 
     let info = MatmulInfo {
@@ -198,8 +198,12 @@ async fn wgpu_matmul_2d(context: &WgpuContext, a: &Array2<f32>, b: &Array2<f32>)
         compute_pass.set_pipeline(&compute_pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
         // Calculate the number of workgroups to dispatch. shader uses 8x8 workgroups.
-        let workgroup_x = (m as u32 + 7) / 8;
-        let workgroup_y = (n as u32 + 7) / 8;
+        // let workgroup_x = (m as u32 + 7) / 8;
+        // let workgroup_y = (n as u32 + 7) / 8;
+        let workgroup_size = 16;
+        let workgroup_x = (n as u32 + workgroup_size - 1) / workgroup_size;
+        let workgroup_y = (m as u32 + workgroup_size - 1) / workgroup_size;
+        
         compute_pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
     }
 
@@ -215,7 +219,6 @@ async fn wgpu_matmul_2d(context: &WgpuContext, a: &Array2<f32>, b: &Array2<f32>)
     // Submit the commands to the GPU to execute.
     context.queue.submit(std::iter::once(encoder.finish()));
 
-    // Request to map the staging buffer so we can read it.
     let buffer_slice = staging_buffer.slice(..);
     let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
     buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
@@ -223,7 +226,6 @@ async fn wgpu_matmul_2d(context: &WgpuContext, a: &Array2<f32>, b: &Array2<f32>)
     
     context.device.poll(PollType::wait_indefinitely());
 
-    // Await the mapping result and handle potential errors.
     if let Some(Ok(())) = receiver.receive().await {
         let data = buffer_slice.get_mapped_range();
         let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
@@ -232,7 +234,6 @@ async fn wgpu_matmul_2d(context: &WgpuContext, a: &Array2<f32>, b: &Array2<f32>)
         drop(data);
         staging_buffer.unmap();
 
-        // Convert the flat Vec<f32> back into our 2D ndarray::Array2
         Array2::from_shape_vec((m, n), result).unwrap()
     } else {
         panic!("Failed to read back data from GPU")
