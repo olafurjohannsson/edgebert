@@ -2,6 +2,8 @@
 //! 
 //! Provides autoregressive language models for text generation.
 
+pub mod bert;
+
 pub mod gptconfig;
 pub mod bertconfig;
 pub mod model;

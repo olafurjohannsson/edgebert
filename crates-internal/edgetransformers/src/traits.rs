@@ -98,7 +98,6 @@ pub struct DecoderOutput<T = f32> {
 pub trait Encoder: Model {
     type Input;
     type Output;
-    type Config: ModelConfig;
 
     /// Asynchronously performs a forward pass through the encoder.
     ///
@@ -124,7 +123,6 @@ pub trait Encoder: Model {
 pub trait Decoder: Model {
     type Input;
     type Output;
-    type Config: ModelConfig;
 
     /// Asynchronously performs a forward pass through the decoder.
     ///
@@ -152,7 +150,6 @@ pub trait Decoder: Model {
 pub trait CrossAttentionDecoder: Model {
     type Input;
     type Output;
-    type Config: ModelConfig;
 
     /// Asynchronously performs a forward pass through the cross-attention decoder.
     ///
@@ -173,4 +170,150 @@ pub trait CrossAttentionDecoder: Model {
         encoder_attention_mask: &Array2<f32>,
         cache: Option<&mut dyn Cache>,
     ) -> Result<Self::Output>;
+}
+
+/// A trait providing high-level configuration shared by all transformer models.
+///
+/// This provides the essential hyperparameters needed to construct the layers
+/// of a transformer model, such as the hidden dimensions and the number of
+/// layers to build.
+pub trait TransformerConfig {
+    /// The size of the hidden states and embedding dimensions.
+    fn hidden_size(&self) -> usize;
+    /// The number of attention heads in each multi-head attention layer.
+    fn num_attention_heads(&self) -> usize;
+    /// The total number of transformer layers (or blocks) in the model stack.
+    fn num_hidden_layers(&self) -> usize;
+    /// The epsilon value to use in LayerNorm layers for numerical stability.
+    fn layer_norm_eps(&self) -> f32;
+}
+
+/// Describes the specific architectural details of an Encoder-only model (e.g., BERT, RoBERTa).
+///
+/// This trait acts as a "blueprint" that a generic `TransformerEncoder` can use to
+/// construct itself. It provides a mapping from abstract component concepts (e.g., "the query
+/// projection of the first layer's attention") to the concrete tensor names found in a
+/// `safetensors` weight file.
+pub trait EncoderArchitecture: TransformerConfig {
+    /// Returns the tensor names for the word, position, and token type embeddings.
+    fn get_embedding_weight_names(&self) -> (&str, &str, &str);
+
+    /// Returns the tensor names for the LayerNorm applied after the embedding layer.
+    fn get_embedding_layer_norm_names(&self) -> (&str, &str);
+
+    /// Returns the names of all weights and biases for the attention component of a specific encoder layer.
+    fn get_attention_names(&self, layer_index: usize) -> LayerAttentionNames;
+
+    /// Returns the names of all weights and biases for the feed-forward component of a specific encoder layer.
+    fn get_feed_forward_names(&self, layer_index: usize) -> LayerFeedForwardNames;
+}
+
+/// A container for the concrete tensor names of an attention block in a transformer layer.
+///
+/// An instance of this struct is returned by `EncoderArchitecture::get_attention_names`,
+/// providing the generic `TransformerEncoder` with all the keys it needs to load the
+/// weights for a single attention component from a `ModelWeights` object.
+pub struct LayerAttentionNames {
+    /// Weight tensor for the Query projection.
+    pub q_weight: String,
+    /// Bias tensor for the Query projection.
+    pub q_bias: String,
+    /// Weight tensor for the Key projection.
+    pub k_weight: String,
+    /// Bias tensor for the Key projection.
+    pub k_bias: String,
+    /// Weight tensor for the Value projection.
+    pub v_weight: String,
+    /// Bias tensor for the Value projection.
+    pub v_bias: String,
+    /// Weight tensor for the output projection.
+    pub output_weight: String,
+    /// Bias tensor for the output projection.
+    pub output_bias: String,
+    /// Weight tensor for the LayerNorm following the attention block.
+    pub norm_weight: String,
+    /// Bias tensor for the LayerNorm following the attention block.
+    pub norm_bias: String,
+}
+
+/// A container for the concrete tensor names of a feed-forward block in a transformer layer.
+///
+/// An instance of this struct is returned by `EncoderArchitecture::get_feed_forward_names`,
+/// providing the generic `TransformerEncoder` with all the keys it needs to load the
+/// weights for a single feed-forward component from a `ModelWeights` object.
+pub struct LayerFeedForwardNames {
+    /// Weight tensor for the intermediate (first) dense layer.
+    pub intermediate_weight: String,
+    /// Bias tensor for the intermediate (first) dense layer.
+    pub intermediate_bias: String,
+    /// Weight tensor for the output (second) dense layer.
+    pub output_weight: String,
+    /// Bias tensor for the output (second) dense layer.
+    pub output_bias: String,
+    /// Weight tensor for the LayerNorm following the feed-forward block.
+    pub norm_weight: String,
+    /// Bias tensor for the LayerNorm following the feed-forward block.
+    pub norm_bias: String,
+}
+
+/// Describes the architectural specifics of a Decoder-only model (e.g., GPT-2, Llama).
+///
+/// This trait will enable the creation of a generic `TransformerDecoder` for
+/// autoregressive language models by providing the necessary weight tensor names.
+pub trait DecoderArchitecture: TransformerConfig {
+    /// Returns the tensor names for the word and position embeddings.
+    fn get_embedding_weight_names(&self) -> (&str, &str);
+    /// Returns the tensor names for the final LayerNorm before the LM head.
+    fn get_final_layer_norm_names(&self) -> (&str, &str);
+    /// Returns the name of the language modeling head weight tensor, which projects to the vocabulary.
+    fn get_lm_head_name(&self) -> &str;
+    /// Returns the names for the single, combined QKV projection in a decoder layer's attention block.
+    fn get_attention_names(&self, layer_index: usize) -> LayerDecoderAttentionNames;
+    /// Returns the names for the feed-forward block in a decoder layer.
+    fn get_feed_forward_names(&self, layer_index: usize) -> LayerFeedForwardNames;
+}
+
+/// A container for the concrete tensor names of a decoder's causal self-attention block.
+///
+/// This is often different from an encoder's attention, sometimes using a single
+/// combined projection matrix for Q, K, and V.
+pub struct LayerDecoderAttentionNames {
+    /// Weight for the combined Query, Key, and Value projection.
+    pub qkv_weight: String,
+    /// Bias for the combined Query, Key, and Value projection.
+    pub qkv_bias: String,
+    /// Weight for the output projection.
+    pub output_weight: String,
+    /// Bias for the output projection.
+    pub output_bias: String,
+    /// Weight for the LayerNorm preceding the attention block.
+    pub norm_weight: String,
+    /// Bias for the LayerNorm preceding the attention block.
+    pub norm_bias: String,
+}
+
+/// Describes the architectural specifics of an Encoder-Decoder model (e.g., BART, T5).
+///
+/// This trait will enable the creation of a generic `TransformerEncoderDecoder` for
+/// sequence-to-sequence tasks. It provides methods to get tensor names for all
+/// components: the shared embeddings, the encoder stack, and the decoder stack
+/// (including its self-attention and cross-attention blocks).
+pub trait EncoderDecoderArchitecture: TransformerConfig {
+    /// Returns the name of the shared word embedding weight tensor.
+    fn get_shared_embedding_weight_name(&self) -> &str;
+
+    /// Returns the names for the encoder's specific components.
+    fn get_encoder_attention_names(&self, layer_index: usize) -> LayerAttentionNames;
+    fn get_encoder_feed_forward_names(&self, layer_index: usize) -> LayerFeedForwardNames;
+
+    /// Returns the names for the decoder's self-attention block.
+    fn get_decoder_self_attention_names(&self, layer_index: usize) -> LayerAttentionNames;
+    /// Returns the names for the decoder's cross-attention block, which attends to encoder outputs.
+    fn get_decoder_cross_attention_names(&self, layer_index: usize) -> LayerAttentionNames;
+    /// Returns the names for the decoder's feed-forward block.
+    fn get_decoder_feed_forward_names(&self, layer_index: usize) -> LayerFeedForwardNames;
+
+    /// Returns the name of the optional final bias tensor applied to the logits.
+    /// (e.g., `final_logits_bias` in BART). Returns `None` if not present.
+    fn get_final_logits_bias_name(&self) -> Option<&str>;
 }

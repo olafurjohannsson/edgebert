@@ -2,6 +2,7 @@ use anyhow::Result;
 use edgemodels::model::{BertModel, BertModelType, cosine_similarity};
 
 fn main() -> Result<()> {
+    println!("Loading MiniLML6V2BiEncoder");
     let model = BertModel::from_pretrained(BertModelType::MiniLML6V2BiEncoder)?;
 
     let texts = vec!["Hello world", "How are you?", "Goodbye world"];

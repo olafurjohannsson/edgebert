@@ -201,12 +201,11 @@ pub fn generate_text(
     )
 }
 
-pub async fn generate_encoder_decoder(
+pub fn generate_encoder_decoder(
     model: &BartModel,
     tokenizer: &Tokenizer,
     prompt: &str,
     config: &GenerationConfig,
-    context: &WgpuContext,
 ) -> Result<String> {
     let num_beams = config.num_beams;
     let min_length = 56;
@@ -230,7 +229,7 @@ pub async fn generate_encoder_decoder(
     
     let encoder_hidden_states = model
         .encoder
-        .forward(encoder_embeddings, &encoder_mask_array, context).await?;
+        .forward(encoder_embeddings, &encoder_mask_array)?;
 
     let mut beams: Vec<BeamHypothesis> = vec![BeamHypothesis {
         tokens: vec![model.config.bos_token_id],

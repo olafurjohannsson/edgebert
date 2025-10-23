@@ -6,7 +6,7 @@ use edgetransformers::wgpu_context::WgpuContext;
 fn main() -> Result<()> {
     println!("Loading DistilBART model for summarization...");
     
-    let context = pollster::block_on(WgpuContext::new());
+    // let context = pollster::block_on(WgpuContext::new());
 
     let model = GenerativeModel::from_pretrained(GenerativeModelType::DistilBartCnn12_6)?;
 
@@ -30,7 +30,7 @@ fn main() -> Result<()> {
 
     println!("\nOriginal Text:\n{}", article_text);
 
-    let summary = pollster::block_on(model.generate1(article_text, &config, &context))?;
+    let summary = model.generate(article_text, &config)?;
 
     println!("\nGenerated Summary:\n{}", summary);
 

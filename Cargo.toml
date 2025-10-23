@@ -6,6 +6,8 @@ members = [
     "crates-internal/edgemodels",      
 ]
 
+resolver = "2"
+
 [workspace.package]
 version = "0.1.0"
 authors = ["Ólafur Aron Jóhannsson <olafurjohannss@gmail.com>"]
@@ -27,6 +29,12 @@ tokenizers = { version = "0.15", default-features = false, features = ["onig"] }
 
 
 wgpu = "0.18"
-pollster = "0.3"
+pollster = "0.4.0"
 bytemuck = { version = "1.14", features = ["derive"] }
 futures-intrusive = "0.5"
+
+[workspace.dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# reqwest and dirs are needed for the example file to download models
+reqwest = { version = "0.12.23", features = ["blocking"] }
+dirs = "5.0"

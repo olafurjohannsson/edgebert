@@ -29,6 +29,7 @@ half = "2.7.1"
 pollster = "0.4.0"
 lru = "0.16.2"
 once_cell = "1.21.3"
+dirs = "6.0.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokenizers = { version = "0.22.1", default-features = false, features = ["onig"] }
@@ -54,3 +55,11 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
+# reqwest and dirs are needed for the example file to download models
+reqwest = { version = "0.12.23", features = ["blocking"] }
+dirs = "5.0"
+anyhow = "1"
+#edgetransformers = { path = "../edgetransformers" } # Or however you specify features

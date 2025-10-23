@@ -11,9 +11,14 @@ pub mod activations;
 pub mod pooling;
 pub mod utils;
 pub mod config;
+pub mod traits;
+pub mod weights;
+pub mod encoder;
+pub mod prelude;
 
 pub mod wgpu_context;
 pub mod wgpu_ops;
+pub mod gpu_pipeline;
 
 // Re-export
 pub use attention::MultiHeadAttention;

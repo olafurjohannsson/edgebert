@@ -92,7 +92,8 @@ impl GenerativeModel {
                 unimplemented!("Not implemented");
             }
             GenerativeModel::Bart(model) => {
-                generate_encoder_decoder(model, &model.tokenizer, prompt, config, context).await
+                // generate_encoder_decoder(model, &model.tokenizer, prompt, config, context).await
+                unimplemented!("Not implemented");
             }
         }
     }
@@ -110,8 +111,7 @@ impl GenerativeModel {
                 generate_text(&model.base, &model.tokenizer, prompt, config)
             }
             GenerativeModel::Bart(model) => {
-                unimplemented!("Not implemented");
-                // generate_encoder_decoder(model, &model.tokenizer, prompt, config)
+                generate_encoder_decoder(model, &model.tokenizer, prompt, config)
             }
         }
     }

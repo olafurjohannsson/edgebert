@@ -24,11 +24,10 @@ pub struct BartEncoderLayer {
     ffn_layer_norm: LayerNorm,
 }
 impl BartEncoderLayer {
-    pub async fn forward(
+    pub fn forward(
         &self,
         hidden_states: &Array3<f32>,
         attention_mask: &Array2<f32>,
-        context: &WgpuContext,
     ) -> Result<Array3<f32>> {
         let residual = hidden_states;
         let (self_attn_output, _) = self.self_attn.forward_bart(
@@ -44,7 +43,7 @@ impl BartEncoderLayer {
             .self_attn_layer_norm
             .forward_3d(&hidden_states_after_attn);
         let residual = &hidden_states_after_attn_ln;
-        let ffn_output = self.ffn.forward_gpu2(residual, context).await?;
+        let ffn_output = self.ffn.forward(residual)?;
         let hidden_states_before_norm = residual + &ffn_output;
         let final_hidden_states = self.ffn_layer_norm.forward_3d(&hidden_states_before_norm);
 
@@ -57,14 +56,13 @@ pub struct BartEncoder {
 }
 
 impl BartEncoder {
-    pub async fn forward(
+    pub fn forward(
         &self,
         mut hidden_states: Array3<f32>,
         attention_mask: &Array2<f32>,
-        context: &WgpuContext,
     ) -> Result<Array3<f32>> {
         for layer in self.layers.iter() {
-            hidden_states = layer.forward(&hidden_states, attention_mask, context).await?;
+            hidden_states = layer.forward(&hidden_states, attention_mask)?;
         }
         Ok(hidden_states)
     }
