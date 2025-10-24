@@ -1,7 +1,7 @@
 //! A reusable orchestrator for running a generic transformer encoder pipeline on the GPU.
 
 use anyhow::{Result, anyhow};
-use ndarray::{s, Array3};
+use ndarray::{Array2, Array3, s};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use wgpu::{Buffer, CommandEncoder, include_wgsl};
@@ -10,10 +10,11 @@ use crate::MultiHeadAttention;
 use crate::gpu_ops::{
     add::run_gpu_add,
     add_bias::run_gpu_add_bias,
+    apply_mask::run_gpu_apply_mask,
     common::read_buffer_to_ndarray,
     ffn::{GpuFeedForwardWeights, run_gpu_ffn},
     layer_norm::run_gpu_layer_norm,
-    matmul::{run_gpu_matmul, run_gpu_bmm},
+    matmul::{run_gpu_bmm, run_gpu_matmul},
     reshape::{run_gpu_reshape, run_gpu_unreshape},
     softmax::run_gpu_softmax,
 };
@@ -58,6 +59,7 @@ impl GpuEncoderPipeline {
         &self,
         config: &C,
         initial_embeddings: &Array3<f32>,
+        attention_mask: &Array2<f32>,
         embedding_norm_weights: (&Buffer, &Buffer),
         layers: &[GpuTransformerLayer],
     ) -> Result<Array3<f32>> {
@@ -92,7 +94,11 @@ impl GpuEncoderPipeline {
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-
+        let mask_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Attention Mask Buffer"),
+            contents: bytemuck::cast_slice(attention_mask.as_slice().unwrap()),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Encoder Pipeline"),
         });
@@ -124,6 +130,7 @@ impl GpuEncoderPipeline {
                 current_state,
                 intermediate_state,
                 &layer.attention_weights,
+                &mask_buffer,
                 batch_size,
                 seq_len,
                 config.hidden_size(),
@@ -202,6 +209,7 @@ fn run_gpu_attention_block(
     input: &Buffer,
     output: &Buffer,
     weights: &GpuAttentionWeights,
+    mask: &Buffer,
     batch_size: usize,
     seq_len: usize,
     hidden_size: usize,
@@ -214,7 +222,18 @@ fn run_gpu_attention_block(
     let qkv_buffer_size = (batch_size * seq_len * hidden_size * std::mem::size_of::<f32>()) as u64;
     let usage =
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
-
+    let temp_a = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Temp A"),
+        size: qkv_buffer_size,
+        usage,
+        mapped_at_creation: false,
+    });
+    let temp_b = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Temp B"),
+        size: qkv_buffer_size,
+        usage,
+        mapped_at_creation: false,
+    });
     // Buffers for matmul results
     let q_proj = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Q Proj"),
@@ -284,20 +303,12 @@ fn run_gpu_attention_block(
     let n = hidden_size as u32;
 
     // Q = Input * Wq + Bq
-    run_gpu_matmul(context, encoder, input, &weights.q_weight, &q_proj, m, k, n);
-    // CORRECTED: Write biased result to a new buffer `proj_biased`
-    run_gpu_add_bias(
-        context,
-        encoder,
-        &q_proj,
-        &weights.q_bias,
-        &proj_biased,
-        (m * n) as u32,
-    );
+    run_gpu_matmul(context, encoder, input, &weights.q_weight, &temp_a, m, k, k);
+    run_gpu_add_bias(context, encoder, &temp_a, &weights.q_bias, &temp_b, m * k);
     run_gpu_reshape(
         context,
         encoder,
-        &proj_biased,
+        &temp_b,
         &q_permuted,
         batch_size as u32,
         seq_len as u32,
@@ -306,20 +317,13 @@ fn run_gpu_attention_block(
         false,
     );
 
-    // K = Input * Wk + Bk
-    run_gpu_matmul(context, encoder, input, &weights.k_weight, &k_proj, m, k, n);
-    run_gpu_add_bias(
-        context,
-        encoder,
-        &k_proj,
-        &weights.k_bias,
-        &proj_biased,
-        (m * n) as u32,
-    );
+    // K Path: input -> temp_a -> temp_b -> k_permuted_t
+    run_gpu_matmul(context, encoder, input, &weights.k_weight, &temp_a, m, k, k);
+    run_gpu_add_bias(context, encoder, &temp_a, &weights.k_bias, &temp_b, m * k);
     run_gpu_reshape(
         context,
         encoder,
-        &proj_biased,
+        &temp_b,
         &k_permuted_t,
         batch_size as u32,
         seq_len as u32,
@@ -328,20 +332,13 @@ fn run_gpu_attention_block(
         true,
     );
 
-    // V = Input * Wv + Bv
-    run_gpu_matmul(context, encoder, input, &weights.v_weight, &v_proj, m, k, n);
-    run_gpu_add_bias(
-        context,
-        encoder,
-        &v_proj,
-        &weights.v_bias,
-        &proj_biased,
-        (m * n) as u32,
-    );
+    // V Path: input -> temp_a -> temp_b -> v_permuted
+    run_gpu_matmul(context, encoder, input, &weights.v_weight, &temp_a, m, k, k);
+    run_gpu_add_bias(context, encoder, &temp_a, &weights.v_bias, &temp_b, m * k);
     run_gpu_reshape(
         context,
         encoder,
-        &proj_biased,
+        &temp_b,
         &v_permuted,
         batch_size as u32,
         seq_len as u32,
@@ -351,18 +348,29 @@ fn run_gpu_attention_block(
     );
 
     // --- 3. Attention Scores: Q @ K^T ---
-    run_gpu_matmul(
+    run_gpu_bmm(
         context,
         encoder,
         &q_permuted,
         &k_permuted_t,
         &scores,
-        (batch_size * num_heads * seq_len) as u32,
+        (batch_size * num_heads) as u32,
+        seq_len as u32,
         head_dim as u32,
         seq_len as u32,
     );
 
-    // --- 4. Softmax ---
+    run_gpu_apply_mask(
+        context,
+        encoder,
+        &scores,
+        mask,
+        batch_size as u32,
+        num_heads as u32,
+        seq_len as u32,
+    );
+
+    // 4. Softmax (in-place on scores)
     let scale = 1.0 / (head_dim as f32).sqrt();
     run_gpu_softmax(
         context,
@@ -373,49 +381,47 @@ fn run_gpu_attention_block(
         scale,
     );
 
-    // --- 5. Apply Scores to V: Scores @ V ---
-    run_gpu_matmul(
+    // 5. Apply Scores to V: Scores @ V -> context_vectors
+    run_gpu_bmm(
         context,
         encoder,
         &scores,
         &v_permuted,
         &context_vectors,
-        (batch_size * num_heads * seq_len) as u32,
+        (batch_size * num_heads) as u32,
+        seq_len as u32,
         seq_len as u32,
         head_dim as u32,
     );
 
-    // --- 6. "Un-reshape" and Output Projection ---
+    // 6. "Un-reshape" and Output Projection
     run_gpu_unreshape(
         context,
         encoder,
         &context_vectors,
-        &proj_biased,
+        &temp_a,
         batch_size as u32,
         seq_len as u32,
         num_heads as u32,
         head_dim as u32,
     );
-
-    // For the final projection, we will use `q_proj` as a temporary buffer for the matmul result.
     run_gpu_matmul(
         context,
         encoder,
-        &proj_biased,
+        &temp_a,
         &weights.output_weight,
-        &q_proj,
+        &temp_b,
         m,
         k,
         k,
     );
-    // CORRECTED: The final `add_bias` writes to the true `output` buffer.
     run_gpu_add_bias(
         context,
         encoder,
-        &q_proj,
+        &temp_b,
         &weights.output_bias,
         output,
-        (m * n) as u32,
+        m * k,
     );
 }
 
@@ -584,7 +590,7 @@ mod tests {
         Ok(())
     }
 
-     #[tokio::test]
+    #[tokio::test]
     async fn test_attention_scores_correctness2() -> Result<()> {
         let context = get_test_context().await;
         let device = &context.device;
@@ -593,47 +599,94 @@ mod tests {
         let (batch_size, seq_len, hidden_size, num_heads) = (1, 8, 32, 4);
         let head_dim = hidden_size / num_heads;
 
-        let input_cpu: Array3<f32> = Array::random((batch_size, seq_len, hidden_size), Uniform::new(-1.0, 1.0));
-        let q_w_cpu: Array2<f32> = Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
+        let input_cpu: Array3<f32> =
+            Array::random((batch_size, seq_len, hidden_size), Uniform::new(-1.0, 1.0));
+        let q_w_cpu: Array2<f32> =
+            Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
         let q_b_cpu: Array1<f32> = Array::random(hidden_size, Uniform::new(-0.5, 0.5));
-        let k_w_cpu: Array2<f32> = Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
+        let k_w_cpu: Array2<f32> =
+            Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
         let k_b_cpu: Array1<f32> = Array::random(hidden_size, Uniform::new(-0.5, 0.5));
-        
+
         // --- GPU Buffer Setup ---
-        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
-        let qkv_buffer_size = (batch_size * seq_len * hidden_size * std::mem::size_of::<f32>()) as u64;
+        let usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST;
+        let qkv_buffer_size =
+            (batch_size * seq_len * hidden_size * std::mem::size_of::<f32>()) as u64;
 
         let input_gpu = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Scores Test Input"), contents: bytemuck::cast_slice(input_cpu.as_slice().unwrap()), usage,
+            label: Some("Scores Test Input"),
+            contents: bytemuck::cast_slice(input_cpu.as_slice().unwrap()),
+            usage,
         });
         let q_weight_gpu = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Scores Test Q Weight"), contents: bytemuck::cast_slice(q_w_cpu.as_slice().unwrap()), usage,
+            label: Some("Scores Test Q Weight"),
+            contents: bytemuck::cast_slice(q_w_cpu.as_slice().unwrap()),
+            usage,
         });
         let q_bias_gpu = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Scores Test Q Bias"), contents: bytemuck::cast_slice(q_b_cpu.as_slice().unwrap()), usage,
+            label: Some("Scores Test Q Bias"),
+            contents: bytemuck::cast_slice(q_b_cpu.as_slice().unwrap()),
+            usage,
         });
         let k_weight_gpu = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Scores Test K Weight"), contents: bytemuck::cast_slice(k_w_cpu.as_slice().unwrap()), usage,
+            label: Some("Scores Test K Weight"),
+            contents: bytemuck::cast_slice(k_w_cpu.as_slice().unwrap()),
+            usage,
         });
         let k_bias_gpu = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Scores Test K Bias"), contents: bytemuck::cast_slice(k_b_cpu.as_slice().unwrap()), usage,
+            label: Some("Scores Test K Bias"),
+            contents: bytemuck::cast_slice(k_b_cpu.as_slice().unwrap()),
+            usage,
         });
-        
-        let q_proj = device.create_buffer(&wgpu::BufferDescriptor { label: Some("Scores Q Proj"), size: qkv_buffer_size, usage, mapped_at_creation: false });
-        let k_proj = device.create_buffer(&wgpu::BufferDescriptor { label: Some("Scores K Proj"), size: qkv_buffer_size, usage, mapped_at_creation: false });
-        let proj_biased = device.create_buffer(&wgpu::BufferDescriptor { label: Some("Scores Proj Biased"), size: qkv_buffer_size, usage, mapped_at_creation: false });
-        let q_permuted = device.create_buffer(&wgpu::BufferDescriptor { label: Some("Scores Q Permuted"), size: qkv_buffer_size, usage, mapped_at_creation: false });
-        let k_permuted_t = device.create_buffer(&wgpu::BufferDescriptor { label: Some("Scores K Permuted T"), size: qkv_buffer_size, usage, mapped_at_creation: false });
-        
-        let scores_buffer_size = (batch_size * num_heads * seq_len * seq_len * std::mem::size_of::<f32>()) as u64;
-        let scores_gpu = device.create_buffer(&wgpu::BufferDescriptor { label: Some("Scores Output"), size: scores_buffer_size, usage, mapped_at_creation: false });
-        
+
+        let q_proj = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Scores Q Proj"),
+            size: qkv_buffer_size,
+            usage,
+            mapped_at_creation: false,
+        });
+        let k_proj = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Scores K Proj"),
+            size: qkv_buffer_size,
+            usage,
+            mapped_at_creation: false,
+        });
+        let proj_biased = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Scores Proj Biased"),
+            size: qkv_buffer_size,
+            usage,
+            mapped_at_creation: false,
+        });
+        let q_permuted = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Scores Q Permuted"),
+            size: qkv_buffer_size,
+            usage,
+            mapped_at_creation: false,
+        });
+        let k_permuted_t = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Scores K Permuted T"),
+            size: qkv_buffer_size,
+            usage,
+            mapped_at_creation: false,
+        });
+
+        let scores_buffer_size =
+            (batch_size * num_heads * seq_len * seq_len * std::mem::size_of::<f32>()) as u64;
+        let scores_gpu = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Scores Output"),
+            size: scores_buffer_size,
+            usage,
+            mapped_at_creation: false,
+        });
+
         // --- 2. Act & Assert, Step-by-Step ---
 
         // == Step A: Verify Q-Permuted ==
         let input_2d = input_cpu.view().into_shape((seq_len, hidden_size))?;
         let q_biased_cpu = input_2d.dot(&q_w_cpu) + &q_b_cpu;
-                let mut cpu_q_permuted = Array3::<f32>::zeros((num_heads, seq_len, head_dim));
+        let mut cpu_q_permuted = Array3::<f32>::zeros((num_heads, seq_len, head_dim));
         for s_idx in 0..seq_len {
             for h_idx in 0..num_heads {
                 for d_idx in 0..head_dim {
@@ -643,15 +696,47 @@ mod tests {
             }
         }
 
-        let mut encoder_q = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        run_gpu_matmul(&context, &mut encoder_q, &input_gpu, &q_weight_gpu, &q_proj, (seq_len * batch_size) as u32, hidden_size as u32, hidden_size as u32);
-        run_gpu_add_bias(&context, &mut encoder_q, &q_proj, &q_bias_gpu, &proj_biased, (seq_len * hidden_size * batch_size) as u32);
-        run_gpu_reshape(&context, &mut encoder_q, &proj_biased, &q_permuted, batch_size as u32, seq_len as u32, num_heads as u32, head_dim as u32, false);
+        let mut encoder_q =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        run_gpu_matmul(
+            &context,
+            &mut encoder_q,
+            &input_gpu,
+            &q_weight_gpu,
+            &q_proj,
+            (seq_len * batch_size) as u32,
+            hidden_size as u32,
+            hidden_size as u32,
+        );
+        run_gpu_add_bias(
+            &context,
+            &mut encoder_q,
+            &q_proj,
+            &q_bias_gpu,
+            &proj_biased,
+            (seq_len * hidden_size * batch_size) as u32,
+        );
+        run_gpu_reshape(
+            &context,
+            &mut encoder_q,
+            &proj_biased,
+            &q_permuted,
+            batch_size as u32,
+            seq_len as u32,
+            num_heads as u32,
+            head_dim as u32,
+            false,
+        );
         context.queue.submit(std::iter::once(encoder_q.finish()));
-        let gpu_q_permuted_array = read_buffer_to_ndarray(&context, &q_permuted, (num_heads, seq_len, head_dim)).await?;
-        
+        let gpu_q_permuted_array =
+            read_buffer_to_ndarray(&context, &q_permuted, (num_heads, seq_len, head_dim)).await?;
+
         println!("Verifying intermediate Q-Permuted...");
-        assert_vecs_are_close(cpu_q_permuted.as_slice().unwrap(), gpu_q_permuted_array.as_slice().unwrap(), 1e-4);
+        assert_vecs_are_close(
+            cpu_q_permuted.as_slice().unwrap(),
+            gpu_q_permuted_array.as_slice().unwrap(),
+            1e-4,
+        );
         println!("✅ Intermediate Q-Permuted is correct.");
 
         // == Step B: Verify K-Permuted-Transposed ==
@@ -667,15 +752,47 @@ mod tests {
             }
         }
 
-        let mut encoder_k = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        run_gpu_matmul(&context, &mut encoder_k, &input_gpu, &k_weight_gpu, &k_proj, (seq_len * batch_size) as u32, hidden_size as u32, hidden_size as u32);
-        run_gpu_add_bias(&context, &mut encoder_k, &k_proj, &k_bias_gpu, &proj_biased, (seq_len * hidden_size * batch_size) as u32);
-        run_gpu_reshape(&context, &mut encoder_k, &proj_biased, &k_permuted_t, batch_size as u32, seq_len as u32, num_heads as u32, head_dim as u32, true);
+        let mut encoder_k =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        run_gpu_matmul(
+            &context,
+            &mut encoder_k,
+            &input_gpu,
+            &k_weight_gpu,
+            &k_proj,
+            (seq_len * batch_size) as u32,
+            hidden_size as u32,
+            hidden_size as u32,
+        );
+        run_gpu_add_bias(
+            &context,
+            &mut encoder_k,
+            &k_proj,
+            &k_bias_gpu,
+            &proj_biased,
+            (seq_len * hidden_size * batch_size) as u32,
+        );
+        run_gpu_reshape(
+            &context,
+            &mut encoder_k,
+            &proj_biased,
+            &k_permuted_t,
+            batch_size as u32,
+            seq_len as u32,
+            num_heads as u32,
+            head_dim as u32,
+            true,
+        );
         context.queue.submit(std::iter::once(encoder_k.finish()));
-        let gpu_k_permuted_t_array = read_buffer_to_ndarray(&context, &k_permuted_t, (num_heads, head_dim, seq_len)).await?;
+        let gpu_k_permuted_t_array =
+            read_buffer_to_ndarray(&context, &k_permuted_t, (num_heads, head_dim, seq_len)).await?;
 
         println!("Verifying intermediate K-Permuted-Transposed...");
-        assert_vecs_are_close(cpu_k_permuted_t.as_slice().unwrap(), gpu_k_permuted_t_array.as_slice().unwrap(), 1e-4);
+        assert_vecs_are_close(
+            cpu_k_permuted_t.as_slice().unwrap(),
+            gpu_k_permuted_t_array.as_slice().unwrap(),
+            1e-4,
+        );
         println!("✅ Intermediate K-Permuted-Transposed is correct.");
 
         // == Step C: Verify Final Scores ==
@@ -683,7 +800,9 @@ mod tests {
         for i in 0..num_heads {
             let q_head = cpu_q_permuted.slice(s![i, .., ..]);
             let k_head = cpu_k_permuted_t.slice(s![i, .., ..]);
-            scores_cpu.slice_mut(s![i, .., ..]).assign(&q_head.dot(&k_head));
+            scores_cpu
+                .slice_mut(s![i, .., ..])
+                .assign(&q_head.dot(&k_head));
         }
         let scale = 1.0 / (head_dim as f32).sqrt();
         scores_cpu *= scale;
@@ -699,123 +818,168 @@ mod tests {
             }
         }
 
-        let mut encoder_scores = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        
+        let mut encoder_scores =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
         // Use the new batched matmul for Q @ K^T
         run_gpu_bmm(
-            &context, &mut encoder_scores,
-            &q_permuted, &k_permuted_t, &scores_gpu,
+            &context,
+            &mut encoder_scores,
+            &q_permuted,
+            &k_permuted_t,
+            &scores_gpu,
             (batch_size * num_heads) as u32, // B
-            seq_len as u32,                   // M
-            head_dim as u32,                  // K
-            seq_len as u32                    // N
+            seq_len as u32,                  // M
+            head_dim as u32,                 // K
+            seq_len as u32,                  // N
         );
-        
-        run_gpu_softmax(&context, &mut encoder_scores, &scores_gpu, (batch_size * num_heads * seq_len) as u32, seq_len as u32, scale);
-        context.queue.submit(std::iter::once(encoder_scores.finish()));
-        let gpu_scores_array = read_buffer_to_ndarray(&context, &scores_gpu, (num_heads, seq_len, seq_len)).await?;
-        
+
+        run_gpu_softmax(
+            &context,
+            &mut encoder_scores,
+            &scores_gpu,
+            (batch_size * num_heads * seq_len) as u32,
+            seq_len as u32,
+            scale,
+        );
+        context
+            .queue
+            .submit(std::iter::once(encoder_scores.finish()));
+        let gpu_scores_array =
+            read_buffer_to_ndarray(&context, &scores_gpu, (num_heads, seq_len, seq_len)).await?;
+
         println!("Verifying final Attention Scores against CPU implementation...");
-        assert_vecs_are_close(scores_cpu.as_slice().unwrap(), gpu_scores_array.as_slice().unwrap(), 1e-4);
+        assert_vecs_are_close(
+            scores_cpu.as_slice().unwrap(),
+            gpu_scores_array.as_slice().unwrap(),
+            1e-4,
+        );
         println!("✅ Attention Score calculation is correct!");
 
         Ok(())
     }
 
-    // #[tokio::test]
-    // async fn test_attention_block_correctness() -> Result<()> {
-    //     let context = get_test_context().await;
-    //     let device = &context.device;
+    #[tokio::test]
+    async fn test_attention_block_correctness() -> Result<()> {
+        let context = get_test_context().await;
+        let device = &context.device;
 
-    //     // --- 1. Arrange ---
-    //     let (batch_size, seq_len, hidden_size, num_heads) = (1, 16, 64, 4);
+        // --- 1. Arrange ---
+        let (batch_size, seq_len, hidden_size, num_heads) = (1, 16, 64, 4);
 
-    //     // Create random input data
-    //     let input_cpu: Array3<f32> = Array::random((batch_size, seq_len, hidden_size), Uniform::new(-1.0, 1.0));
-    //     let attention_mask_cpu: Array2<f32> = Array2::ones((batch_size, seq_len));
+        // Create random input data
+        let input_cpu: Array3<f32> =
+            Array::random((batch_size, seq_len, hidden_size), Uniform::new(-1.0, 1.0));
+        let attention_mask_cpu: Array2<f32> = Array2::ones((batch_size, seq_len));
 
-    //     // Create random weights, ensuring they are identical for both CPU and GPU paths.
-    //     // Weights are created in the format they would be loaded from a file (e.g., PyTorch's [out, in]).
-    //     let q_w_cpu = Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
-    //     let q_b_cpu = Array::random(hidden_size, Uniform::new(-0.5, 0.5));
-    //     let k_w_cpu = Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
-    //     let k_b_cpu = Array::random(hidden_size, Uniform::new(-0.5, 0.5));
-    //     let v_w_cpu = Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
-    //     let v_b_cpu = Array::random(hidden_size, Uniform::new(-0.5, 0.5));
-    //     let out_w_cpu = Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
-    //     let out_b_cpu = Array::random(hidden_size, Uniform::new(-0.5, 0.5));
+        // Create random weights, ensuring they are identical for both CPU and GPU paths.
+        // Weights are created in the format they would be loaded from a file (e.g., PyTorch's [out, in]).
+        let q_w_cpu = Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
+        let q_b_cpu = Array::random(hidden_size, Uniform::new(-0.5, 0.5));
+        let k_w_cpu = Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
+        let k_b_cpu = Array::random(hidden_size, Uniform::new(-0.5, 0.5));
+        let v_w_cpu = Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
+        let v_b_cpu = Array::random(hidden_size, Uniform::new(-0.5, 0.5));
+        let out_w_cpu = Array::random((hidden_size, hidden_size), Uniform::new(-0.5, 0.5));
+        let out_b_cpu = Array::random(hidden_size, Uniform::new(-0.5, 0.5));
 
-    //     // --- GPU Data Setup ---
-    //     let upload_2d = |tensor: &Array2<f32>| -> Arc<wgpu::Buffer> {
-    //         Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-    //             label: None,
-    //             contents: bytemuck::cast_slice(tensor.as_standard_layout().as_slice().unwrap()),
-    //             usage: wgpu::BufferUsages::STORAGE
-    //         }))
-    //     };
-    //     let upload_1d = |tensor: &Array1<f32>| -> Arc<wgpu::Buffer> {
-    //         Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-    //             label: None,
-    //             contents: bytemuck::cast_slice(tensor.as_slice().unwrap()),
-    //             usage: wgpu::BufferUsages::STORAGE
-    //         }))
-    //     };
+        // --- GPU Data Setup ---
+        let upload_2d = |tensor: &Array2<f32>| -> Arc<wgpu::Buffer> {
+            Arc::new(
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(tensor.as_standard_layout().as_slice().unwrap()),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+            )
+        };
+        let upload_1d = |tensor: &Array1<f32>| -> Arc<wgpu::Buffer> {
+            Arc::new(
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(tensor.as_slice().unwrap()),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+            )
+        };
 
-    //     // The GPU path expects pre-transposed weights, just like the CPU path.
-    //     // This simulates the logic from `GpuTransformerEncoder::new`.
-    //     let gpu_weights = GpuAttentionWeights {
-    //         q_weight: upload_2d(&q_w_cpu.t().to_owned()), q_bias: upload_1d(&q_b_cpu),
-    //         k_weight: upload_2d(&k_w_cpu.t().to_owned()), k_bias: upload_1d(&k_b_cpu),
-    //         v_weight: upload_2d(&v_w_cpu.t().to_owned()), v_bias: upload_1d(&v_b_cpu),
-    //         output_weight: upload_2d(&out_w_cpu.t().to_owned()), output_bias: upload_1d(&out_b_cpu),
-    //         // Norm weights are not used by this specific function, so they can be dummy values.
-    //         norm_weight: upload_1d(&Array1::zeros(hidden_size)),
-    //         norm_bias: upload_1d(&Array1::zeros(hidden_size)),
-    //     };
+        // The GPU path expects pre-transposed weights, just like the CPU path.
+        // This simulates the logic from `GpuTransformerEncoder::new`.
+        let gpu_weights = GpuAttentionWeights {
+            q_weight: upload_2d(&q_w_cpu.t().to_owned()),
+            q_bias: upload_1d(&q_b_cpu),
+            k_weight: upload_2d(&k_w_cpu.t().to_owned()),
+            k_bias: upload_1d(&k_b_cpu),
+            v_weight: upload_2d(&v_w_cpu.t().to_owned()),
+            v_bias: upload_1d(&v_b_cpu),
+            output_weight: upload_2d(&out_w_cpu.t().to_owned()),
+            output_bias: upload_1d(&out_b_cpu),
+            // Norm weights are not used by this specific function, so they can be dummy values.
+            norm_weight: upload_1d(&Array1::zeros(hidden_size)),
+            norm_bias: upload_1d(&Array1::zeros(hidden_size)),
+        };
 
-    //     let input_gpu = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-    //         label: Some("Test Attention Input"),
-    //         contents: bytemuck::cast_slice(input_cpu.as_slice().unwrap()),
-    //         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-    //     });
-    //     let output_gpu = device.create_buffer(&wgpu::BufferDescriptor {
-    //         label: Some("Test Attention Output"),
-    //         size: (batch_size * seq_len * hidden_size * std::mem::size_of::<f32>()) as u64,
-    //         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-    //         mapped_at_creation: false,
-    //     });
+        let input_gpu = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Test Attention Input"),
+            contents: bytemuck::cast_slice(input_cpu.as_slice().unwrap()),
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        });
+        let output_gpu = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Test Attention Output"),
+            size: (batch_size * seq_len * hidden_size * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
 
-    //     // --- 2. Act ---
+        // --- 2. Act ---
 
-    //     // == Ground Truth (CPU Path) ==
-    //     let cpu_attention = MultiHeadAttention::new(
-    //         hidden_size, num_heads,
-    //         q_w_cpu.t().to_owned(), q_b_cpu.clone(),
-    //         k_w_cpu.t().to_owned(), k_b_cpu.clone(),
-    //         v_w_cpu.t().to_owned(), v_b_cpu.clone(),
-    //         out_w_cpu.t().to_owned(), out_b_cpu.clone(),
-    //     );
-    //     let cpu_result = cpu_attention.forward(&input_cpu, None, Some(&attention_mask_cpu))?;
+        // == Ground Truth (CPU Path) ==
+        let cpu_attention = MultiHeadAttention::new(
+            hidden_size,
+            num_heads,
+            q_w_cpu.t().to_owned(),
+            q_b_cpu.clone(),
+            k_w_cpu.t().to_owned(),
+            k_b_cpu.clone(),
+            v_w_cpu.t().to_owned(),
+            v_b_cpu.clone(),
+            out_w_cpu.t().to_owned(),
+            out_b_cpu.clone(),
+        );
+        let cpu_result = cpu_attention.forward(&input_cpu, None, Some(&attention_mask_cpu))?;
 
-    //     // == GPU Path ==
-    //     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Attention Test Encoder") });
-    //     run_gpu_attention_block(
-    //         &context, &mut encoder, &input_gpu, &output_gpu, &gpu_weights,
-    //         batch_size, seq_len, hidden_size, num_heads
-    //     );
-    //     context.queue.submit(std::iter::once(encoder.finish()));
+        // == GPU Path ==
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Attention Test Encoder"),
+        });
+        run_gpu_attention_block(
+            &context,
+            &mut encoder,
+            &input_gpu,
+            &output_gpu,
+            &gpu_weights,
+            batch_size,
+            seq_len,
+            hidden_size,
+            num_heads,
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
 
-    //     let gpu_result_array = read_buffer_to_ndarray(&context, &output_gpu, (batch_size, seq_len, hidden_size)).await?;
+        let gpu_result_array =
+            read_buffer_to_ndarray(&context, &output_gpu, (batch_size, seq_len, hidden_size))
+                .await?;
 
-    //     // --- 3. Assert ---
-    //     println!("Verifying Attention Block GPU kernel against CPU implementation...");
-    //     assert_vecs_are_close(
-    //         cpu_result.as_slice().unwrap(),
-    //         gpu_result_array.as_slice().unwrap(),
-    //         1e-3, // Use a slightly higher tolerance for the complex attention calculation
-    //     );
-    //     println!("✅ Attention Block GPU implementation is correct!");
+        // --- 3. Assert ---
+        println!("Verifying Attention Block GPU kernel against CPU implementation...");
+        assert_vecs_are_close(
+            cpu_result.as_slice().unwrap(),
+            gpu_result_array.as_slice().unwrap(),
+            1e-3, // Use a slightly higher tolerance for the complex attention calculation
+        );
+        println!("✅ Attention Block GPU implementation is correct!");
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 }

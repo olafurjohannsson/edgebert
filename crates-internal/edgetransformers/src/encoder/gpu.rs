@@ -215,7 +215,7 @@ impl Encoder for GpuTransformerEncoder {
     async fn forward(
         &self,
         input_ids: &Self::Input,
-        _attention_mask: &Array2<f32>,
+        attention_mask: &Array2<f32>,
     ) -> Result<Self::Output> {
         // Step 1: CPU-Side Embedding
         let initial_embeddings = self.perform_cpu_embedding(input_ids)?;
@@ -227,6 +227,7 @@ impl Encoder for GpuTransformerEncoder {
                 // CORRECTED: Pass the Arc as a reference. `as_ref()` gets a `&dyn Trait`.
                 self.config.as_ref(),
                 &initial_embeddings,
+                &attention_mask,
                 (
                     &self.embedding_norm_weights.0,
                     &self.embedding_norm_weights.1,

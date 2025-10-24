@@ -5,8 +5,12 @@ use edgetransformers::wgpu_context::WgpuContext;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use rand::seq::SliceRandom;
 
-const USE_GPU: bool = true;
+use std::time::Instant;
+const USE_GPU: bool = false;
+const NUM_RUNS: usize = 5;
+const BATCH_SIZE: usize = 4;
 
 /// ASYNC helper function to ensure model files are available, downloading them if necessary.
 /// This logic lives in the example, NOT in the main library.
@@ -42,6 +46,7 @@ async fn ensure_model_files(repo_id: &str, local_dir: &Path) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let device_type_str = if USE_GPU { "GPU (WGPU)" } else { "CPU" };
     println!("Starting BERT embedding example...");
 
     // --- 1. Define Model and Ensure Files are Present ---
@@ -65,32 +70,73 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    println!("\nInitializing BertBiEncoder on CPU...");
+    println!("\nInitializing BertBiEncoder");
     let device = if USE_GPU { Device::Wgpu } else { Device::Cpu };
     let bi_encoder = BertBiEncoder::from_pretrained(&model_dir, device, wgpu_context)?;
     println!("Model initialized successfully.");
 
     // --- 3. Prepare Input Texts ---
-    let texts_to_encode = vec![
-        "This is an example sentence.",
-        "Each sentence is converted to a vector.",
+    // A pool of sentences to choose from for each batch
+    let sentence_pool = vec![
+        "The quick brown fox jumps over the lazy dog.",
+        "Rust is a systems programming language.",
+        "WGPU provides a modern graphics and compute API.",
+        "This library aims for maximum performance.",
+        "Edge computing is a distributed computing paradigm.",
+        "Multi-head self-attention is a key component.",
+        "This is a test sentence for benchmarking.",
+        "Each vector is a high-dimensional representation.",
+        "The model is running on the specified device.",
+        "We are measuring the mean inference time.",
+        "Hello world from the edge!",
+        "Tokenization splits text into smaller pieces.",
     ];
-    println!("\nEncoding {} sentences...", texts_to_encode.len());
 
-    // --- 4. Call the `encode` method ---
-    let embeddings = bi_encoder.encode(texts_to_encode.clone(), true).await?;
-    println!("Encoding complete.");
+    // --- 3. Warmup Run ---
+    // The first run can be slower due to cache misses, pipeline creation, etc.
+    // We do one run here to warm everything up before starting the timer.
+    println!("\nPerforming one warmup run...");
+    let _ = bi_encoder.encode(vec!["Warmup sentence."], true).await?;
+    println!("Warmup complete.");
 
-    // --- 5. Print the Results ---
-    println!("\n--- Embedding Results ---");
-    for (i, embedding) in embeddings.iter().enumerate() {
-        let norm: f32 = embedding.iter().map(|&x| x * x).sum::<f32>().sqrt();
-        let preview: Vec<f32> = embedding.iter().take(5).cloned().collect();
-        println!(
-            "Text: \"{}\"\n  - Embedding (first 5 dims): {:?}\n  - L2 Norm: {:.4}\n",
-            texts_to_encode[i], preview, norm
-        );
+    // --- 4. Benchmark Loop ---
+    println!("\nStarting benchmark...");
+    let mut durations: Vec<u128> = Vec::with_capacity(NUM_RUNS);
+    let mut rng = rand::thread_rng();
+
+    for i in 0..NUM_RUNS {
+        // Create a random batch for this iteration
+        let mut batch: Vec<&str> = Vec::with_capacity(BATCH_SIZE);
+        for _ in 0..BATCH_SIZE {
+            batch.push(sentence_pool.choose(&mut rng).unwrap());
+        }
+
+        let start_time = Instant::now();
+        let _embeddings = bi_encoder.encode(batch, true).await?;
+        let duration = start_time.elapsed();
+
+        durations.push(duration.as_millis());
+        print!("\rRun {}/{} complete...", i + 1, NUM_RUNS);
     }
+
+    // --- 5. Report Results ---
+    let total_time_ms: u128 = durations.iter().sum();
+    let mean_time_ms = total_time_ms as f64 / NUM_RUNS as f64;
+    let min_time_ms = *durations.iter().min().unwrap_or(&0);
+    let max_time_ms = *durations.iter().max().unwrap_or(&0);
+    let p95_index = (NUM_RUNS as f64 * 0.95) as usize;
+    let mut sorted_durations = durations.clone();
+    sorted_durations.sort();
+    let p95_time_ms = sorted_durations.get(p95_index).unwrap_or(&0);
+
+    println!("\n\n--- Benchmark Results for {} ---", device_type_str);
+    println!("Total runs: {}", NUM_RUNS);
+    println!("Sentences per batch: {}", BATCH_SIZE);
+    println!("\nMean latency: {:.2} ms", mean_time_ms);
+    println!("Min latency:  {} ms", min_time_ms);
+    println!("Max latency:  {} ms", max_time_ms);
+    println!("p95 latency:  {} ms", p95_time_ms);
+    println!("------------------------------------");
 
     Ok(())
 }
