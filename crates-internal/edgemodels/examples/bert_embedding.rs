@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-const USE_GPU: bool = false;
+const USE_GPU: bool = true;
 
 /// ASYNC helper function to ensure model files are available, downloading them if necessary.
 /// This logic lives in the example, NOT in the main library.

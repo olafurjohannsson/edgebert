@@ -16,6 +16,7 @@ pub mod weights;
 pub mod encoder;
 pub mod prelude;
 
+pub mod gpu_ops;
 pub mod wgpu_context;
 pub mod wgpu_ops;
 pub mod gpu_pipeline;

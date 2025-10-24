@@ -35,7 +35,7 @@ pub async fn wgpu_feed_forward_2d(
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("FFN Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ffn.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gpu_ops/ffn/ffn.wgsl").into()),
         });
 
     let bind_group_layout =
@@ -261,7 +261,7 @@ async fn wgpu_matmul_2d(context: &WgpuContext, a: &Array2<f32>, b: &Array2<f32>)
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Matmul Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/matmul_tiled.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gpu_ops/matmul/matmul_tiled.wgsl").into()),
         });
 
     let info = MatmulInfo {

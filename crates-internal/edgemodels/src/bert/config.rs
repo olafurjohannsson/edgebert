@@ -38,6 +38,11 @@ impl TransformerConfig for BertConfig {
 /// This is the "blueprint" that allows the generic `TransformerEncoder` to load
 /// a BERT model's weights correctly.
 impl EncoderArchitecture for BertConfig {
+
+    fn transpose_ffn_weights(&self) -> bool {
+        true
+    }
+
     /// Provides the names for the three embedding tables.
     fn get_embedding_weight_names(&self) -> (&str, &str, &str) {
         (

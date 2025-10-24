@@ -25,7 +25,7 @@ impl CpuTransformerEncoder {
     ///
     /// This function uses the `EncoderArchitecture` trait to dynamically look up
     /// the names of all required weight tensors and constructs the full model stack.
-    pub fn new<C>(weights: &ModelWeights, config: Arc<C>,) -> Result<Self>
+    pub fn new<C>(weights: &ModelWeights, config: Arc<C>) -> Result<Self>
     where
         C: EncoderArchitecture + Send + Sync + ?Sized,
     {
@@ -41,7 +41,7 @@ impl CpuTransformerEncoder {
         let embeddings_layer_norm = LayerNorm::new(
             weights.get_array1(norm_w)?,
             weights.get_array1(norm_b)?,
-            config.layer_norm_eps()
+            config.layer_norm_eps(),
         );
 
         // Build each transformer layer.

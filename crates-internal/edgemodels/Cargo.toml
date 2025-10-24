@@ -60,6 +60,6 @@ strip = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
 # reqwest and dirs are needed for the example file to download models
 reqwest = { version = "0.12.23", features = ["blocking"] }
-dirs = "5.0"
+dirs = "6.0.0"
 anyhow = "1"
 #edgetransformers = { path = "../edgetransformers" } # Or however you specify features

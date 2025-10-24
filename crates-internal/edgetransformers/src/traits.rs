@@ -206,6 +206,11 @@ pub trait EncoderArchitecture: TransformerConfig {
 
     /// Returns the names of all weights and biases for the feed-forward component of a specific encoder layer.
     fn get_feed_forward_names(&self, layer_index: usize) -> LayerFeedForwardNames;
+    
+    /// If we should transpose the feedforward weighs 
+    /// The most common convention and vajority of models do this and tre-transpose the weights in FeedForward::new
+    /// The older GPT2 architecture doesn't do this
+    fn transpose_ffn_weights(&self) -> bool;
 }
 
 /// A container for the concrete tensor names of an attention block in a transformer layer.

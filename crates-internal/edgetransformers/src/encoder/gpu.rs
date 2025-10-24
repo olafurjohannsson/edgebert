@@ -13,8 +13,9 @@ use crate::weights::ModelWeights;
 use crate::wgpu_context::WgpuContext;
 // Import the new generic components
 use crate::gpu_pipeline::{
-    GpuAttentionWeights, GpuEncoderPipeline, GpuFeedForwardWeights, GpuTransformerLayer,
+    GpuAttentionWeights, GpuEncoderPipeline, GpuTransformerLayer
 };
+use crate::gpu_ops::ffn::GpuFeedForwardWeights;
 
 /// The GPU backend for a generic Transformer Encoder.
 /// It holds the GPU-native weights and the generic pipeline to execute them.
@@ -30,7 +31,7 @@ pub struct GpuTransformerEncoder {
     embedding_norm_weights: (Arc<wgpu::Buffer>, Arc<wgpu::Buffer>),
     layers: Vec<GpuTransformerLayer>,
 
-    // CORRECTED: The config must be wrapped in an Arc to be thread-safe (`Send + Sync`).
+    // The config must be wrapped in an Arc to be thread-safe (`Send + Sync`).
     // This allows it to be shared across threads if the model is used in an async context.
     config: Arc<dyn EncoderArchitecture + Send + Sync>,
 }
@@ -113,11 +114,27 @@ impl GpuTransformerEncoder {
             let output_b = weights.get_array1(&ffn_names.output_bias)?;
 
             let mut packed_ffn_data: Vec<f32> = Vec::new();
-            packed_ffn_data
-                .extend_from_slice(intermediate_w.as_standard_layout().as_slice().unwrap());
-            packed_ffn_data.extend_from_slice(intermediate_b.as_slice().unwrap());
-            packed_ffn_data.extend_from_slice(output_w.as_standard_layout().as_slice().unwrap());
-            packed_ffn_data.extend_from_slice(output_b.as_slice().unwrap());
+            if config.transpose_ffn_weights() {
+                // For BERT: Transpose [out, in] -> [in, out] to match the shader's expectation.
+                let intermediate_w_t = intermediate_w.t().as_standard_layout().to_owned();
+                let output_w_t = output_w.t().as_standard_layout().to_owned();
+                
+                packed_ffn_data.extend_from_slice(intermediate_w_t.as_slice().unwrap());
+                packed_ffn_data.extend_from_slice(intermediate_b.as_slice().unwrap());
+                packed_ffn_data.extend_from_slice(output_w_t.as_slice().unwrap());
+                packed_ffn_data.extend_from_slice(output_b.as_slice().unwrap());
+            } else {
+                // For GPT-2 style models: Use weights as-is.
+                packed_ffn_data.extend_from_slice(intermediate_w.as_standard_layout().as_slice().unwrap());
+                packed_ffn_data.extend_from_slice(intermediate_b.as_slice().unwrap());
+                packed_ffn_data.extend_from_slice(output_w.as_standard_layout().as_slice().unwrap());
+                packed_ffn_data.extend_from_slice(output_b.as_slice().unwrap());
+            }
+            // packed_ffn_data
+            //     .extend_from_slice(intermediate_w.as_standard_layout().as_slice().unwrap());
+            // packed_ffn_data.extend_from_slice(intermediate_b.as_slice().unwrap());
+            // packed_ffn_data.extend_from_slice(output_w.as_standard_layout().as_slice().unwrap());
+            // packed_ffn_data.extend_from_slice(output_b.as_slice().unwrap());
 
             let packed_weights = Arc::new(device.create_buffer_init(
                 &wgpu::util::BufferInitDescriptor {
