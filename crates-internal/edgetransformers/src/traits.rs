@@ -71,6 +71,10 @@ pub trait Cache: Send + Sync {
     fn as_any(&self) -> &dyn Any;
     /// Returns a mutable reference to the underlying cache as a type-erased `Any` object.
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    /// Get the current sequence length (number of cached tokens)
+    fn get_seq_length(&self) -> usize;
+    /// Clear the cache
+    fn clear(&mut self);
 }
 
 /// The standard output from an encoder model.
@@ -177,7 +181,7 @@ pub trait CrossAttentionDecoder: Model {
 /// This provides the essential hyperparameters needed to construct the layers
 /// of a transformer model, such as the hidden dimensions and the number of
 /// layers to build.
-pub trait TransformerConfig {
+pub trait TransformerConfig: Send + Sync {
     /// The size of the hidden states and embedding dimensions.
     fn hidden_size(&self) -> usize;
     /// The number of attention heads in each multi-head attention layer.
@@ -186,6 +190,10 @@ pub trait TransformerConfig {
     fn num_hidden_layers(&self) -> usize;
     /// The epsilon value to use in LayerNorm layers for numerical stability.
     fn layer_norm_eps(&self) -> f32;
+    ///
+    fn is_causal(&self) -> bool;
+    ///
+    fn is_prenorm(&self) -> bool;
 }
 
 /// Describes the specific architectural details of an Encoder-only model (e.g., BERT, RoBERTa).
@@ -196,7 +204,7 @@ pub trait TransformerConfig {
 /// `safetensors` weight file.
 pub trait EncoderArchitecture: TransformerConfig {
     /// Returns the tensor names for the word, position, and token type embeddings.
-    fn get_embedding_weight_names(&self) -> (&str, &str, &str);
+    fn get_embedding_weight_names(&self) -> (&str, &str, Option<&str>); // RoBERTa has no token_type_embeddings
 
     /// Returns the tensor names for the LayerNorm applied after the embedding layer.
     fn get_embedding_layer_norm_names(&self) -> (&str, &str);
@@ -206,11 +214,30 @@ pub trait EncoderArchitecture: TransformerConfig {
 
     /// Returns the names of all weights and biases for the feed-forward component of a specific encoder layer.
     fn get_feed_forward_names(&self, layer_index: usize) -> LayerFeedForwardNames;
-    
-    /// If we should transpose the feedforward weighs 
+
+    /// If we should transpose the feedforward weighs
     /// The most common convention and vajority of models do this and tre-transpose the weights in FeedForward::new
     /// The older GPT2 architecture doesn't do this
     fn transpose_ffn_weights(&self) -> bool;
+}
+
+/// Describes the architectural specifics of a Decoder-only model (e.g., GPT-2, Llama).
+///
+/// This trait will enable the creation of a generic `TransformerDecoder` for
+/// autoregressive language models by providing the necessary weight tensor names.
+pub trait DecoderArchitecture: TransformerConfig {
+    fn transpose_ffn_weights(&self) -> bool;
+
+    /// Returns the tensor names for the word and position embeddings.
+    fn get_embedding_weight_names(&self) -> (&str, &str);
+    /// Returns the tensor names for the final LayerNorm before the LM head.
+    fn get_final_layer_norm_names(&self) -> (&str, &str);
+    /// Returns the name of the language modeling head weight tensor, which projects to the vocabulary.
+    fn get_lm_head_name(&self) -> &str;
+    /// Returns the names for the single, combined QKV projection in a decoder layer's attention block.
+    fn get_attention_names(&self, layer_index: usize) -> LayerDecoderAttentionNames;
+    /// Returns the names for the feed-forward block in a decoder layer.
+    fn get_feed_forward_names(&self, layer_index: usize) -> LayerFeedForwardNames;
 }
 
 /// A container for the concrete tensor names of an attention block in a transformer layer.
@@ -261,22 +288,7 @@ pub struct LayerFeedForwardNames {
     pub norm_bias: String,
 }
 
-/// Describes the architectural specifics of a Decoder-only model (e.g., GPT-2, Llama).
-///
-/// This trait will enable the creation of a generic `TransformerDecoder` for
-/// autoregressive language models by providing the necessary weight tensor names.
-pub trait DecoderArchitecture: TransformerConfig {
-    /// Returns the tensor names for the word and position embeddings.
-    fn get_embedding_weight_names(&self) -> (&str, &str);
-    /// Returns the tensor names for the final LayerNorm before the LM head.
-    fn get_final_layer_norm_names(&self) -> (&str, &str);
-    /// Returns the name of the language modeling head weight tensor, which projects to the vocabulary.
-    fn get_lm_head_name(&self) -> &str;
-    /// Returns the names for the single, combined QKV projection in a decoder layer's attention block.
-    fn get_attention_names(&self, layer_index: usize) -> LayerDecoderAttentionNames;
-    /// Returns the names for the feed-forward block in a decoder layer.
-    fn get_feed_forward_names(&self, layer_index: usize) -> LayerFeedForwardNames;
-}
+
 
 /// A container for the concrete tensor names of a decoder's causal self-attention block.
 ///

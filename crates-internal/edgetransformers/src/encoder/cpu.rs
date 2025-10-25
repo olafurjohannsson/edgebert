@@ -18,6 +18,7 @@ pub struct CpuTransformerEncoder {
     embeddings: Embeddings,
     embeddings_layer_norm: LayerNorm,
     layers: Vec<TransformerLayer>,
+    config: Arc<dyn EncoderArchitecture + Send + Sync>,
 }
 
 impl CpuTransformerEncoder {
@@ -27,14 +28,13 @@ impl CpuTransformerEncoder {
     /// the names of all required weight tensors and constructs the full model stack.
     pub fn new<C>(weights: &ModelWeights, config: Arc<C>) -> Result<Self>
     where
-        C: EncoderArchitecture + Send + Sync + ?Sized,
+        C: EncoderArchitecture + Send + Sync + 'static,
     {
         // Load embedding weights using the names provided by the config.
         let (word_w, pos_w, type_w) = config.get_embedding_weight_names();
-        let token_type_embeddings = if type_w.is_empty() {
-            Array2::zeros((0, config.hidden_size())) // Empty for RoBERTa
-        } else {
-            weights.get_array2(type_w)?
+        let token_type_embeddings = match type_w {
+            Some(name) => weights.get_array2(name)?, // Load if present
+            None => Array2::zeros((0, config.hidden_size())), // Empty for RoBERTa
         };
         let embeddings = Embeddings::new(
             weights.get_array2(word_w)?,
@@ -106,6 +106,7 @@ impl CpuTransformerEncoder {
             embeddings,
             embeddings_layer_norm,
             layers,
+            config: config as Arc<dyn EncoderArchitecture + Send + Sync>,
         })
     }
 }
@@ -136,7 +137,7 @@ impl Encoder for CpuTransformerEncoder {
 
         //  transformer layers
         for layer in &self.layers {
-            hidden_states = layer.forward(hidden_states, attention_mask)?;
+            hidden_states = layer.forward(hidden_states, attention_mask, self.config.as_ref())?;
         }
 
         Ok(EncoderOutput {

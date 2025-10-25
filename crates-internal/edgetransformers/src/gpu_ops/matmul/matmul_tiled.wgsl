@@ -4,11 +4,10 @@ struct MatmulInfo {
     m: u32,
     k: u32,
     n: u32,
-};
+}
 
 var<workgroup> a_tile: array<f32, TILE_DIM * TILE_DIM>;
 var<workgroup> b_tile: array<f32, TILE_DIM * TILE_DIM>;
-
 
 @group(0) @binding(0) var<uniform> info: MatmulInfo;
 @group(0) @binding(1) var<storage, read> a_in: array<f32>;
@@ -27,20 +26,16 @@ fn main(
     let global_row = group_id.y * TILE_DIM + local_id.y;
     let global_col = group_id.x * TILE_DIM + local_id.x;
 
-    var acc = 0.0; // Accumulator for the final sum.
+    var acc = 0.0;
     let num_tiles = (info.k + TILE_DIM - 1u) / TILE_DIM;
 
-    // Loop over the tiles of the input matrices.
     for (var t = 0u; t < num_tiles; t = t + 1u) {
-
-        // Calculate the source coordinates for this thread's load.
         let a_col = t * TILE_DIM + local_id.x;
         let a_row = group_id.y * TILE_DIM + local_id.y;
         
         let b_col = group_id.x * TILE_DIM + local_id.x;
         let b_row = t * TILE_DIM + local_id.y;
 
-        // Load the data into the shared tiles.
         if (a_row < info.m && a_col < info.k) {
             a_tile[local_id.y * TILE_DIM + local_id.x] = (*a)[a_row * info.k + a_col];
         } else {
@@ -55,12 +50,25 @@ fn main(
 
         workgroupBarrier();
 
-        for (var i = 0u; i < TILE_DIM; i = i + 1u) {
-            acc = acc + a_tile[local_id.y * TILE_DIM + i] * b_tile[i * TILE_DIM + local_id.x];
+        // Unrolled inner loop by 4
+        let tile_idx_base = local_id.y * TILE_DIM;
+        for (var i = 0u; i < TILE_DIM; i = i + 4u) {
+            let a0 = a_tile[tile_idx_base + i];
+            let a1 = a_tile[tile_idx_base + i + 1u];
+            let a2 = a_tile[tile_idx_base + i + 2u];
+            let a3 = a_tile[tile_idx_base + i + 3u];
+            
+            let b0 = b_tile[i * TILE_DIM + local_id.x];
+            let b1 = b_tile[(i + 1u) * TILE_DIM + local_id.x];
+            let b2 = b_tile[(i + 2u) * TILE_DIM + local_id.x];
+            let b3 = b_tile[(i + 3u) * TILE_DIM + local_id.x];
+            
+            acc = acc + a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
         }
 
         workgroupBarrier();
     }
+    
     if (global_row < info.m && global_col < info.n) {
         (*c)[global_row * info.n + global_col] = acc;
     }

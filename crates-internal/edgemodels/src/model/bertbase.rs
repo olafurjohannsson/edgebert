@@ -3,6 +3,7 @@
 use crate::bertconfig::BertConfig;
 use crate::bertweights::BertModelWeights;
 use anyhow::Result;
+use std::sync::Arc;
 use edgetransformers::{Embeddings, FeedForward, LayerNorm, MultiHeadAttention, TransformerLayer};
 use ndarray::{Array2, Array3};
 
@@ -128,10 +129,10 @@ impl BertBase {
 
         // Apply embeddings layer norm
         hidden = self.embeddings_layer_norm.forward_3d(&hidden);
-
+        
         // Pass through transformer layers
         for layer in &self.layers {
-            hidden = layer.forward(hidden, attention_mask)?;
+            // hidden = layer.forward(hidden, attention_mask)?;
         }
 
         Ok(hidden)

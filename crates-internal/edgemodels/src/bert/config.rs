@@ -31,6 +31,12 @@ impl TransformerConfig for BertConfig {
     fn layer_norm_eps(&self) -> f32 {
         self.layer_norm_eps
     }
+    fn is_causal(&self) -> bool {
+        false
+    } // Bidirectional
+    fn is_prenorm(&self) -> bool {
+        false
+    } // Post-norm
 }
 
 /// Implement the `EncoderArchitecture` trait to provide the specific tensor names for BERT.
@@ -38,17 +44,16 @@ impl TransformerConfig for BertConfig {
 /// This is the "blueprint" that allows the generic `TransformerEncoder` to load
 /// a BERT model's weights correctly.
 impl EncoderArchitecture for BertConfig {
-
     fn transpose_ffn_weights(&self) -> bool {
         true
     }
 
     /// Provides the names for the three embedding tables.
-    fn get_embedding_weight_names(&self) -> (&str, &str, &str) {
+    fn get_embedding_weight_names(&self) -> (&str, &str, Option<&str>) {
         (
             "embeddings.word_embeddings.weight",
             "embeddings.position_embeddings.weight",
-            "embeddings.token_type_embeddings.weight",
+            Some("embeddings.token_type_embeddings.weight"),
         )
     }
 
@@ -113,6 +118,13 @@ impl TransformerConfig for BertBaseConfig {
     fn layer_norm_eps(&self) -> f32 {
         self.layer_norm_eps
     }
+    fn is_causal(&self) -> bool {
+        false // Bidirectional - can see entire sequence
+    }
+
+    fn is_prenorm(&self) -> bool {
+        false // Post-norm - LayerNorm AFTER residual
+    }
 }
 
 impl EncoderArchitecture for BertBaseConfig {
@@ -120,16 +132,19 @@ impl EncoderArchitecture for BertBaseConfig {
         true
     }
 
-    fn get_embedding_weight_names(&self) -> (&str, &str, &str) {
+    fn get_embedding_weight_names(&self) -> (&str, &str, Option<&str>) {
         (
             "bert.embeddings.word_embeddings.weight",
             "bert.embeddings.position_embeddings.weight",
-            "bert.embeddings.token_type_embeddings.weight",
+            Some("bert.embeddings.token_type_embeddings.weight"),
         )
     }
 
     fn get_embedding_layer_norm_names(&self) -> (&str, &str) {
-        ("bert.embeddings.LayerNorm.gamma", "bert.embeddings.LayerNorm.beta")
+        (
+            "bert.embeddings.LayerNorm.gamma",
+            "bert.embeddings.LayerNorm.beta",
+        )
     }
 
     fn get_attention_names(&self, i: usize) -> LayerAttentionNames {
@@ -186,6 +201,13 @@ impl TransformerConfig for RobertaConfig {
     fn layer_norm_eps(&self) -> f32 {
         self.layer_norm_eps
     }
+    fn is_causal(&self) -> bool {
+        false // Bidirectional - can see entire sequence
+    }
+
+    fn is_prenorm(&self) -> bool {
+        false // Post-norm - LayerNorm AFTER residual
+    }
 }
 
 impl EncoderArchitecture for RobertaConfig {
@@ -193,11 +215,11 @@ impl EncoderArchitecture for RobertaConfig {
         false
     }
 
-    fn get_embedding_weight_names(&self) -> (&str, &str, &str) {
+    fn get_embedding_weight_names(&self) -> (&str, &str, Option<&str>) {
         (
             "embeddings.word_embeddings.weight",
             "embeddings.position_embeddings.weight",
-            "",  // No token_type_embeddings
+            None, // No token_type_embeddings
         )
     }
 

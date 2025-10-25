@@ -9,11 +9,31 @@ pub struct WgpuContext {
 }
 
 impl WgpuContext {
+    // Wonnx approach - much better:
+    // pub async fn request_device_queue() -> (wgpu::Device, wgpu::Queue) {
+    //     let backends = wgpu::util::backend_bits_from_env().unwrap_or(wgpu::Backends::PRIMARY);
+
+    //     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+    //         backends,
+    //         dx12_shader_compiler: wgpu::Dx12Compiler::Fxc,
+    //         ..Default::default()
+    //     });
+
+    //     // KEY: Use environment variables for adapter selection!
+    //     let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
+    //         .await
+    //         .expect("No GPU found");
+
+    //     adapter
+    //         .request_device(&wgpu::DeviceDescriptor::default(), None)
+    //         .await
+    //         .expect("Could not create adapter")
+    // }
     pub async fn new() -> Self {
         println!("=== Initializing WGPU ===");
 
         let instance = Instance::new(&InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+            backends: wgpu::Backends::PRIMARY,
             flags: wgpu::InstanceFlags::empty(), // Make sure this is empty, NOT debugging
             ..Default::default()
         });
@@ -53,12 +73,13 @@ impl WgpuContext {
             .request_device(&DeviceDescriptor {
                 label: Some("EdgeGPT"),
                 required_features: Features::TIMESTAMP_QUERY
+                    | Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
                     | Features::TIMESTAMP_QUERY_INSIDE_PASSES,
                 required_limits: Limits {
                     max_compute_workgroup_size_x: 1024,
                     max_compute_workgroup_size_y: 1024,
                     max_compute_invocations_per_workgroup: 1024,
-                    max_buffer_size: adapter_limits.max_buffer_size.min(1_073_741_824), // Request min of adapter limit or 1GB
+                    // max_buffer_size: adapter_limits.max_buffer_size.min(1_073_741_824), // Request min of adapter limit or 1GB
                     ..Limits::default()
                 },
                 ..Default::default()

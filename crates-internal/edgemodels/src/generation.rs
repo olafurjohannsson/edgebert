@@ -3,7 +3,8 @@
 use crate::model::bart::BartModel;
 use crate::model::gptbase::GPTBase;
 use anyhow::Result;
-use edgetransformers::TransformerConfig;
+// use edgetransformers::TransformerConfig;
+use crate::gptconfig::{GPTConfig, TransformerConfig, BaseConfig};
 use ndarray::{s, Array1, Array2, Array3, Array4};
 use rand::Rng;
 use std::collections::{HashSet, HashMap};

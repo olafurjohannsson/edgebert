@@ -26,6 +26,13 @@ impl TransformerConfig for RobertaConfig {
     fn layer_norm_eps(&self) -> f32 {
         self.layer_norm_eps
     }
+    fn is_causal(&self) -> bool {
+        false // Bidirectional - can see entire sequence
+    }
+
+    fn is_prenorm(&self) -> bool {
+        false // Post-norm - LayerNorm AFTER residual
+    }
 }
 
 impl EncoderArchitecture for RobertaConfig {
@@ -33,11 +40,11 @@ impl EncoderArchitecture for RobertaConfig {
         false  // RoBERTa doesn't transpose (same as GPT-2 style)
     }
 
-    fn get_embedding_weight_names(&self) -> (&str, &str, &str) {
+    fn get_embedding_weight_names(&self) -> (&str, &str, Option<&str>) {
         (
             "embeddings.word_embeddings.weight",
             "embeddings.position_embeddings.weight",
-            "",  // No token_type_embeddings - return empty string
+            None,  // No token_type_embeddings - return empty string
         )
     }
 
