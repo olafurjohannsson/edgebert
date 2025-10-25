@@ -12,6 +12,7 @@ pub mod gptweights;
 pub mod bertweights;
 pub mod tokenizer;
 pub mod generation;
+pub mod tests;
 
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;

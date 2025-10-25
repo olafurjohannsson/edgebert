@@ -54,13 +54,10 @@ async fn test_matmul_correctness() -> Result<()> {
         label: Some("Matmul Test Encoder"),
     });
     let pipeline = compile_matmul_pipeline(&context);
-    let cache = Mutex::new(BindGroupCache::with_capacity(256, 16));
-    let mut c = cache.lock().unwrap();
     run_gpu_matmul(
         &context,
         &mut encoder,
         &pipeline,
-        &mut *c,
         &input_a_gpu,
         &input_b_gpu,
         &output_c_gpu,

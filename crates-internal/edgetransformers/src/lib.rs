@@ -15,6 +15,7 @@ pub mod feedforward;
 pub mod gpu_ops;
 pub mod gpu_pipeline;
 pub mod layer_norm;
+pub mod model_type;
 pub mod pooling;
 pub mod prelude;
 pub mod traits;

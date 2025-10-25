@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use edgemodels::bert::BiEncoder;
+use edgemodels::bert::SentenceEncoder;
 use edgemodels::roberta::RobertaBiEncoder;
 use edgemodels::roberta::RobertaConfig;
 use edgetransformers::prelude::Device;
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
     };
     println!("\nInitializing BertBiEncoder");
     let device = if USE_GPU { Device::Wgpu } else { Device::Cpu };
-    let bi_encoder = BiEncoder::from_pretrained(&model_dir, device, wgpu_context)?;
+    let bi_encoder = SentenceEncoder::from_pretrained(&model_dir, device, wgpu_context)?;
     println!("Model initialized successfully.");
 
     // --- 3. Prepare Input Texts ---

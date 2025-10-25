@@ -22,33 +22,33 @@ pub use config::{BertConfig, RobertaConfig, BertBaseConfig};
 ///
 /// This struct composes a generic `TransformerEncoder` with a tokenizer and
 /// the necessary pooling logic to produce sentence embeddings.
-pub struct BiEncoder {
+pub struct SentenceEncoder {
     base_encoder: TransformerEncoder,
     tokenizer: Tokenizer,
 }
 
 
 // todo: use 
-// #[derive(Debug, Clone)]
-// pub enum Model {
-//     // Sentence Transformers
-//     MiniLML6V2,
-//     MPNetBaseV2,
+#[derive(Debug, Clone)]
+pub enum Model {
+    // Sentence Transformers
+    MiniLML6V2,
+    MPNetBaseV2,
     
-//     // Base BERT models
-//     BertBaseUncased,
-//     BertBaseCased,
-//     BertLargeUncased,
+    // Base BERT models
+    BertBaseUncased,
+    BertBaseCased,
+    BertLargeUncased,
     
-//     // RoBERTa
-//     RobertaBase,
-//     RobertaLarge,
+    // RoBERTa
+    RobertaBase,
+    RobertaLarge,
     
-//     /// Custom model from HuggingFace Hub
-//     Custom(String),
-// }
+    /// Custom model from HuggingFace Hub
+    Custom(String),
+}
 
-impl BiEncoder { // todo: change to sentenceEncoder
+impl SentenceEncoder { // todo: change to sentenceEncoder
     /// Creates a new `BiEncoder`
     pub fn from_pretrained(
         model_path: &Path,
@@ -56,16 +56,9 @@ impl BiEncoder { // todo: change to sentenceEncoder
         context: Option<Arc<WgpuContext>>,
     ) -> Result<Self> {
         let weights = ModelWeights::new(model_path)?;
-        println!("\n=== Available Tensors ===");
-        let mut keys: Vec<_> = weights.tensors.keys().collect();
-        keys.sort();
-        for key in keys.iter().take(30) {
-            // Show first 30
-            println!("  {}", key);
-        }
-        println!("Total tensors: {}", weights.tensors.len());
-        println!("========================\n");
-        let config: BertConfig = serde_json::from_str(&weights.config_json)?;
+        
+        
+        // let config: BertConfig = serde_json::from_str(&weights.config_json)?;
         let tokenizer = Tokenizer::from_file(model_path.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 

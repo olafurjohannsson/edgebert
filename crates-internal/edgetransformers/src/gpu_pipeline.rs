@@ -88,7 +88,6 @@ pub struct GpuTransformerLayer {
 pub struct GpuEncoderPipeline {
     context: Arc<WgpuContext>,
     pipeline: HashMap<Pipeline, Arc<ComputePipeline>>,
-    bind_group_cache: Mutex<BindGroupCache>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -154,7 +153,6 @@ impl GpuEncoderPipeline {
         Ok(Self {
             context,
             pipeline,
-            bind_group_cache: Mutex::new(BindGroupCache::with_capacity(256, 16)),
         })
     }
     fn create_aligned_buffer(
@@ -347,9 +345,9 @@ impl GpuEncoderPipeline {
 
         // === GPU ENCODING WITH TIMESTAMPS ===
         let encode_start = Instant::now();
+        
         let result_buffer = {
             let cache_start = Instant::now();
-            let mut cache = self.bind_group_cache.lock().unwrap();
             println!("Mutex lock acquired: {:?}", cache_start.elapsed());
 
             let mut query_idx = 0u32;
@@ -376,6 +374,7 @@ impl GpuEncoderPipeline {
             query_idx += 1;
             println!("Initial LayerNorm encoded: {:?}", norm_start.elapsed());
 
+
             let current_state = &buffer_b;
             let intermediate_state = &buffer_a;
 
@@ -394,7 +393,6 @@ impl GpuEncoderPipeline {
                     &self.context,
                     &mut encoder,
                     &self.pipeline,
-                    &mut *cache,
                     current_state,
                     intermediate_state,
                     &layer.attention_weights,
@@ -504,6 +502,8 @@ impl GpuEncoderPipeline {
                 query_idx += 1;
 
                 println!("  Layer {} encoded: {:?}", idx, layer_start.elapsed());
+                    // DEBUG: Read back after first layer
+
             }
 
             // Final timestamp
@@ -624,7 +624,6 @@ fn run_gpu_attention_block(
     context: &WgpuContext,
     encoder: &mut CommandEncoder,
     pipeline: &HashMap<Pipeline, Arc<ComputePipeline>>,
-    bind_group_cache: &mut BindGroupCache,
     input: &Buffer,
     output: &Buffer,
     weights: &GpuAttentionWeights,
@@ -650,7 +649,6 @@ fn run_gpu_attention_block(
         context,
         encoder,
         pipeline.get(&Pipeline::MatMul).unwrap(),
-        bind_group_cache,
         input,
         &weights.q_weight,
         &temp.q_proj,
@@ -693,7 +691,6 @@ fn run_gpu_attention_block(
         context,
         encoder,
         pipeline.get(&Pipeline::MatMul).unwrap(),
-        bind_group_cache,
         input,
         &weights.k_weight,
         &temp.k_proj,
@@ -736,7 +733,6 @@ fn run_gpu_attention_block(
         context,
         encoder,
         pipeline.get(&Pipeline::MatMul).unwrap(),
-        bind_group_cache,
         input,
         &weights.v_weight,
         &temp.v_proj,
@@ -779,7 +775,6 @@ fn run_gpu_attention_block(
         context,
         encoder,
         pipeline.get(&Pipeline::BMM).unwrap(),
-        bind_group_cache,
         &temp.q_permuted,
         &temp.k_permuted_t,
         &temp.scores,
@@ -824,7 +819,6 @@ fn run_gpu_attention_block(
         context,
         encoder,
         pipeline.get(&Pipeline::BMM).unwrap(),
-        bind_group_cache,
         &temp.scores,
         &temp.v_permuted,
         &temp.context_vectors,
@@ -856,7 +850,6 @@ fn run_gpu_attention_block(
         context,
         encoder,
         pipeline.get(&Pipeline::MatMul).unwrap(),
-        bind_group_cache,
         &temp.proj_biased,
         &weights.output_weight,
         &temp.q_proj,
@@ -886,7 +879,7 @@ mod tests {
     use ndarray::{Array, Array1, Array2, Array3};
     use ndarray_rand::RandomExt;
     use rand_distr::Uniform;
-    use tokio::net::unix::pipe; // <--- this is the correct one
+    
 
     /// A helper function to get a WGPU context for testing.
     /// Panics if a GPU adapter cannot be found.
@@ -1000,13 +993,11 @@ mod tests {
         let matmul_pipeline = compile_matmul_pipeline(&context);
         let add_bias_pipeline = compile_add_bias_pipeline(&context);
         let reshape_pipeline = compile_reshape_pipeline(&context);
-        let cache = Mutex::new(BindGroupCache::with_capacity(256, 16));
-        let mut c = cache.lock().unwrap();
+        
         run_gpu_matmul(
             &context,
             &mut encoder,
             &matmul_pipeline,
-            &mut *c,
             &input_gpu,
             &q_weight_gpu,
             &q_proj_gpu,
@@ -1165,13 +1156,11 @@ mod tests {
         let matmul_pipeline = compile_matmul_pipeline(&context);
         let add_bias_pipeline = compile_add_bias_pipeline(&context);
         let reshape_pipeline = compile_reshape_pipeline(&context);
-        let cache = Mutex::new(BindGroupCache::with_capacity(256, 16));
-        let mut c = cache.lock().unwrap();
+        
         run_gpu_matmul(
             &context,
             &mut encoder_q,
             &matmul_pipeline,
-            &mut *c,
             &input_gpu,
             &q_weight_gpu,
             &q_proj,
@@ -1231,7 +1220,6 @@ mod tests {
             &context,
             &mut encoder_k,
             &matmul_pipeline,
-            &mut *c,
             &input_gpu,
             &k_weight_gpu,
             &k_proj,
@@ -1303,7 +1291,6 @@ mod tests {
             &context,
             &mut encoder_scores,
             &bmm_pipline,
-            &mut c,
             &q_permuted,
             &k_permuted_t,
             &scores_gpu,
@@ -1339,6 +1326,7 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
     async fn test_attention_block_correctness() -> Result<()> {
     let context = get_test_context().await;
     let device = &context.device;
@@ -1454,7 +1442,7 @@ mod tests {
         | wgpu::BufferUsages::COPY_SRC
         | wgpu::BufferUsages::COPY_DST;
     let mut pipeline: HashMap<Pipeline, Arc<ComputePipeline>> = HashMap::new();
-    let cache = Mutex::new(BindGroupCache::with_capacity(256, 16));
+    
     pipeline.insert(Pipeline::MatMul, Arc::new(compile_matmul_pipeline(&context)));
     pipeline.insert(Pipeline::AddBias, Arc::new(compile_add_bias_pipeline(&context)));
     pipeline.insert(Pipeline::Reshape, Arc::new(compile_reshape_pipeline(&context)));
@@ -1536,12 +1524,10 @@ mod tests {
     }
 };
     
-    let mut c = cache.lock().unwrap();
     run_gpu_attention_block(
         &context,
         &mut encoder,
         &pipeline,
-        &mut *c,
         &input_gpu,
         &output_gpu,
         &gpu_weights,

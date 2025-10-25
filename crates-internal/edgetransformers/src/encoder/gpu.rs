@@ -276,7 +276,24 @@ impl Encoder for GpuTransformerEncoder {
     ) -> Result<Self::Output> {
         // Step 1: CPU-Side Embedding
         let initial_embeddings = self.perform_cpu_embedding(input_ids)?;
-
+        println!("\n[GPU ENCODER] Initial embeddings (before GPU pipeline):");
+        println!("  Shape: {:?}", initial_embeddings.dim());
+        println!(
+            "  Min: {:.6}, Max: {:.6}, Mean: {:.6}",
+            initial_embeddings
+                .iter()
+                .cloned()
+                .fold(f32::INFINITY, f32::min),
+            initial_embeddings
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max),
+            initial_embeddings.mean().unwrap()
+        );
+        println!(
+            "  First 10: {:?}",
+            &initial_embeddings.as_slice().unwrap()[..10]
+        );
         // Step 2: Call the Generic Pipeline
         let last_hidden_state = self
             .pipeline
@@ -292,7 +309,25 @@ impl Encoder for GpuTransformerEncoder {
                 &self.layers,
             )
             .await?;
-
+        // DEBUG: Print output AFTER GPU processing
+        println!("\n[GPU ENCODER] Output (after GPU pipeline):");
+        println!("  Shape: {:?}", last_hidden_state.dim());
+        println!(
+            "  Min: {:.6}, Max: {:.6}, Mean: {:.6}",
+            last_hidden_state
+                .iter()
+                .cloned()
+                .fold(f32::INFINITY, f32::min),
+            last_hidden_state
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max),
+            last_hidden_state.mean().unwrap()
+        );
+        println!(
+            "  First 10: {:?}",
+            &last_hidden_state.as_slice().unwrap()[..10]
+        );
         Ok(EncoderOutput { last_hidden_state })
     }
 }
