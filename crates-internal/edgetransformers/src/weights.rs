@@ -19,7 +19,7 @@ use std::path::Path;
 /// self-contained source of truth for constructing a model.
 pub struct ModelWeights {
     /// A map from tensor names to their data (as `Vec<f32>`) and shape.
-    tensors: HashMap<String, (Vec<f32>, Vec<usize>)>,
+    pub tensors: HashMap<String, (Vec<f32>, Vec<usize>)>,
     /// The raw JSON string content of the model's `config.json` file.
     pub config_json: String,
 }
@@ -92,7 +92,7 @@ impl ModelWeights {
         let (data, shape) = self
             .tensors
             .get(name)
-            .ok_or_else(|| anyhow!("Tensor '{}' not found in weights", name))?;
+            .ok_or_else(|| anyhow!("Tensor '{}' 1d not found in weights", name))?;
         anyhow::ensure!(
             shape.len() == 1,
             "Expected 1D tensor for '{}', but got shape {:?}",
@@ -107,7 +107,7 @@ impl ModelWeights {
         let (data, shape) = self
             .tensors
             .get(name)
-            .ok_or_else(|| anyhow!("Tensor '{}' not found in weights", name))?;
+            .ok_or_else(|| anyhow!("Tensor '{}' 2d not found in weights", name))?;
         anyhow::ensure!(
             shape.len() == 2,
             "Expected 2D tensor for '{}', but got shape {:?}",

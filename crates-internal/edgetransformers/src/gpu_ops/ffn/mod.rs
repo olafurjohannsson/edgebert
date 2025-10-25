@@ -1,39 +1,9 @@
-use wgpu::util::DeviceExt;
-use wgpu::{Buffer, CommandEncoder, include_wgsl};
 use crate::wgpu_context::WgpuContext;
 use std::sync::Arc;
+use wgpu::util::DeviceExt;
+use wgpu::{Buffer, CommandEncoder, ComputePipeline, include_wgsl};
 
-#[derive(Clone)]
-pub struct GpuFeedForwardWeights {
-    // pub intermediate_weight: Arc<Buffer>,
-    // pub intermediate_bias: Arc<Buffer>,
-    // pub output_weight: Arc<Buffer>,
-    // pub output_bias: Arc<Buffer>,
-    pub packed_weights: Arc<wgpu::Buffer>,
-    pub norm_weight: Arc<Buffer>,
-    pub norm_bias: Arc<Buffer>,
-}
-
-pub fn run_gpu_ffn(
-    context: &WgpuContext,
-    encoder: &mut CommandEncoder,
-    input: &Buffer,
-    output: &Buffer,
-    weights: &GpuFeedForwardWeights,
-    rows: u32,              // batch_size * seq_len
-    hidden_size: u32,       // K
-    intermediate_size: u32, // N
-) {
-    /// A uniform struct to pass metadata (dimensions) to the ffn.wgsl shader.
-    #[repr(C)]
-    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-    struct FfnUniforms {
-        m: u32,
-        k: u32,
-        n: u32,
-        _padding: u32, // Structs in WGSL are aligned to 16 bytes
-    }
-
+pub fn compile_ffn_pipeline(context: &WgpuContext) -> ComputePipeline {
     let device = &context.device;
     let shader = device.create_shader_module(include_wgsl!("./ffn.wgsl"));
 
@@ -102,6 +72,38 @@ pub fn run_gpu_ffn(
         compilation_options: Default::default(),
         cache: None,
     });
+    pipeline
+}
+
+#[derive(Clone)]
+pub struct GpuFeedForwardWeights {
+    pub packed_weights: Arc<wgpu::Buffer>,
+    pub norm_weight: Arc<Buffer>,
+    pub norm_bias: Arc<Buffer>,
+}
+
+pub fn run_gpu_ffn(
+    context: &WgpuContext,
+    encoder: &mut CommandEncoder,
+    pipeline: &ComputePipeline,
+    input: &Buffer,
+    output: &Buffer,
+    weights: &GpuFeedForwardWeights,
+    rows: u32,              // batch_size * seq_len
+    hidden_size: u32,       // K
+    intermediate_size: u32, // N
+) {
+    /// A uniform struct to pass metadata (dimensions) to the ffn.wgsl shader.
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+    struct FfnUniforms {
+        m: u32,
+        k: u32,
+        n: u32,
+        _padding: u32, // Structs in WGSL are aligned to 16 bytes
+    }
+
+    let device = &context.device;
 
     let uniforms = FfnUniforms {
         m: rows,
@@ -117,7 +119,7 @@ pub fn run_gpu_ffn(
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("FFN Bind Group"),
-        layout: &bind_group_layout,
+        layout: &pipeline.get_bind_group_layout(0),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -148,7 +150,6 @@ pub fn run_gpu_ffn(
     let workgroup_x = (rows + 255) / 256;
     compute_pass.dispatch_workgroups(workgroup_x, 1, 1);
 }
-
 
 #[cfg(test)]
 mod tests;

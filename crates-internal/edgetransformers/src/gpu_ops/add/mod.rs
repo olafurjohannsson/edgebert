@@ -1,23 +1,8 @@
-
-use wgpu::util::DeviceExt;
-use wgpu::{Buffer, CommandEncoder, include_wgsl};
 use crate::wgpu_context::WgpuContext;
+use wgpu::util::DeviceExt;
+use wgpu::{Buffer, CommandEncoder, ComputePipeline, include_wgsl};
 
-pub fn run_gpu_add(
-    context: &WgpuContext,
-    encoder: &mut wgpu::CommandEncoder,
-    a: &wgpu::Buffer,
-    b: &wgpu::Buffer,
-    output: &wgpu::Buffer,
-    size: u32,
-) {
-    #[repr(C)]
-    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-    struct AddUniforms {
-        size: u32,
-        _padding: [u32; 3],
-    } // Add padding for alignment
-
+pub fn compile_add_pipeline(context: &WgpuContext) -> ComputePipeline {
     let device = &context.device;
     let shader = device.create_shader_module(include_wgsl!("./add.wgsl"));
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -85,6 +70,25 @@ pub fn run_gpu_add(
         cache: None,
     });
 
+    pipeline
+}
+
+pub fn run_gpu_add(
+    context: &WgpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &ComputePipeline,
+    a: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    output: &wgpu::Buffer,
+    size: u32,
+) {
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+    struct AddUniforms {
+        size: u32,
+        _padding: [u32; 3],
+    } // Add padding for alignment
+    let device = &context.device;
     let uniforms = AddUniforms {
         size,
         _padding: [0; 3],
@@ -95,10 +99,10 @@ pub fn run_gpu_add(
         usage: wgpu::BufferUsages::UNIFORM,
     });
 
-    // Now, the BindGroup will be created with a layout that is guaranteed to match.
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Add Bind Group"),
-        layout: &bind_group_layout, // Use the same layout
+        // The layout can be retrieved directly from the pre-compiled pipeline.
+        layout: &pipeline.get_bind_group_layout(0),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -123,10 +127,11 @@ pub fn run_gpu_add(
         label: Some("Add Compute Pass"),
         timestamp_writes: None,
     });
-    compute_pass.set_pipeline(&pipeline);
+    compute_pass.set_pipeline(pipeline);
     compute_pass.set_bind_group(0, &bind_group, &[]);
     let workgroup_x = (size + 255) / 256;
     compute_pass.dispatch_workgroups(workgroup_x, 1, 1);
 }
+
 #[cfg(test)]
 mod tests;

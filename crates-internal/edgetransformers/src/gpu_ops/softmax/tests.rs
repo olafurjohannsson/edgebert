@@ -55,9 +55,11 @@ async fn test_softmax_correctness() -> Result<()> {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("Softmax Test Encoder"),
     });
+    let pipeline = compile_softmax_pipeline(&context);
     run_gpu_softmax(
         &context,
         &mut encoder,
+        &pipeline,
         &data_gpu,
         rows as u32,
         cols as u32,

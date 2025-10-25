@@ -2,9 +2,26 @@
 
 use anyhow::{Result, anyhow};
 use ndarray::{Array2, Array3, s};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread::current;
+use std::time::Instant;
+use wgpu::ComputePipeline;
 use wgpu::util::DeviceExt;
+use wgpu::wgc::pipeline;
 use wgpu::{Buffer, CommandEncoder, include_wgsl};
+
+use crate::gpu_ops::add::compile_add_pipeline;
+use crate::gpu_ops::add_bias::compile_add_bias_pipeline;
+use crate::gpu_ops::apply_mask::compile_apply_mask_pipeline;
+use crate::gpu_ops::ffn::compile_ffn_pipeline;
+use crate::gpu_ops::layer_norm::compile_layer_norm_pipeline;
+use crate::gpu_ops::matmul::{compile_bmm_pipeline, compile_matmul_pipeline};
+use crate::gpu_ops::reshape::{compile_reshape_pipeline, compile_unreshape_pipeline};
+use crate::gpu_ops::softmax::compile_softmax_pipeline;
+
+use crate::bind_group::{BindGroupCache, CacheStats};
 
 use crate::MultiHeadAttention;
 use crate::gpu_ops::{
@@ -37,6 +54,27 @@ pub struct GpuAttentionWeights {
     pub norm_bias: Arc<Buffer>,
 }
 
+/// A container for all temporary, reusable buffers required by the `run_gpu_attention_block`.
+///
+/// Creating these buffers is expensive, so they are created once per `forward` pass
+/// and then reused by each layer, dramatically reducing overhead.
+struct AttentionTempBuffers {
+    // Buffers for the initial Q, K, V projections after matmul
+    q_proj: Buffer,
+    k_proj: Buffer,
+    v_proj: Buffer,
+    // A reusable buffer for the output of bias additions
+    proj_biased: Buffer,
+    // Buffers for the reshaped Q, K, V tensors
+    q_permuted: Buffer,
+    k_permuted_t: Buffer,
+    v_permuted: Buffer,
+    // Buffer for the raw attention scores (Q @ K^T)
+    scores: Buffer,
+    // Buffer for the context vectors (Softmax(Scores) @ V)
+    context_vectors: Buffer,
+}
+
 #[derive(Clone)]
 pub struct GpuTransformerLayer {
     pub attention_weights: GpuAttentionWeights,
@@ -46,12 +84,68 @@ pub struct GpuTransformerLayer {
 /// The reusable orchestrator for the GPU encoder pipeline.
 pub struct GpuEncoderPipeline {
     context: Arc<WgpuContext>,
-    // You would cache the compiled pipelines here for performance
+    pipeline: HashMap<Pipeline, Arc<ComputePipeline>>,
+    bind_group_cache: Mutex<BindGroupCache>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Pipeline {
+    // todo: change to PipelineType
+    Add,
+    AddBias,
+    ApplyMask,
+    FFN,
+    LayerNorm,
+    BMM,
+    MatMul,
+    Reshape,
+    Unreshape,
+    Softmax,
 }
 
 impl GpuEncoderPipeline {
     pub fn new(context: Arc<WgpuContext>) -> Result<Self> {
-        Ok(Self { context })
+        let mut pipeline = HashMap::new();
+        println!("Compiling GPU compute shaders...");
+
+        let device = &context.device;
+
+        let add_pipeline = Arc::new(compile_add_pipeline(&context));
+        pipeline.insert(Pipeline::Add, add_pipeline);
+
+        let add_bias_pipeline = Arc::new(compile_add_bias_pipeline(&context));
+        pipeline.insert(Pipeline::AddBias, add_bias_pipeline);
+
+        let apply_mask_pipeline = Arc::new(compile_apply_mask_pipeline(&context));
+        pipeline.insert(Pipeline::ApplyMask, apply_mask_pipeline);
+
+        let ffn_pipeline = Arc::new(compile_ffn_pipeline(&context));
+        pipeline.insert(Pipeline::FFN, ffn_pipeline);
+
+        let layer_norm_pipeline = Arc::new(compile_layer_norm_pipeline(&context));
+        pipeline.insert(Pipeline::LayerNorm, layer_norm_pipeline);
+
+        let bmm_pipeline = Arc::new(compile_bmm_pipeline(&context));
+        pipeline.insert(Pipeline::BMM, bmm_pipeline);
+
+        let matmul_pipeline = Arc::new(compile_matmul_pipeline(&context));
+
+        pipeline.insert(Pipeline::MatMul, matmul_pipeline);
+
+        let reshape_pipeline = Arc::new(compile_reshape_pipeline(&context));
+        pipeline.insert(Pipeline::Reshape, reshape_pipeline);
+
+        let unreshape_pipeline = Arc::new(compile_unreshape_pipeline(&context));
+        pipeline.insert(Pipeline::Unreshape, unreshape_pipeline);
+
+        let softmax_pipeline = Arc::new(compile_softmax_pipeline(&context));
+        pipeline.insert(Pipeline::Softmax, softmax_pipeline);
+
+        Ok(Self {
+            context,
+            pipeline,
+            bind_group_cache: Mutex::new(BindGroupCache::with_capacity(256, 16)),
+        })
     }
 
     /// Executes the full, end-to-end GPU forward pass for a transformer encoder.
@@ -63,35 +157,42 @@ impl GpuEncoderPipeline {
         embedding_norm_weights: (&Buffer, &Buffer),
         layers: &[GpuTransformerLayer],
     ) -> Result<Array3<f32>> {
+        use std::time::Instant;
+        let total_start = Instant::now();
+
         let (batch_size, seq_len, hidden_size) = initial_embeddings.dim();
+        println!("\n=== GPU Forward Pass ===");
+        println!(
+            "Batch: {}, SeqLen: {}, Hidden: {}",
+            batch_size, seq_len, hidden_size
+        );
+
         let device = &self.context.device;
         let buffer_size = (batch_size * seq_len * hidden_size * std::mem::size_of::<f32>())
             as wgpu::BufferAddress;
+        let usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC;
 
-        // Create the three main buffers for our pipeline
+        // === BUFFER CREATION ===
+        let buffer_start = Instant::now();
         let buffer_a = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Pipeline Buffer A"),
             contents: bytemuck::cast_slice(
                 initial_embeddings.as_standard_layout().as_slice().unwrap(),
             ),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
+            usage,
         });
         let buffer_b = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Pipeline Buffer B"),
             size: buffer_size,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
+            usage,
             mapped_at_creation: false,
         });
         let residual_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Residual Buffer"),
             size: buffer_size,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
+            usage,
             mapped_at_creation: false,
         });
         let mask_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -99,106 +200,222 @@ impl GpuEncoderPipeline {
             contents: bytemuck::cast_slice(attention_mask.as_slice().unwrap()),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        println!("Main buffers created: {:?}", buffer_start.elapsed());
+
+        let encoder_start = Instant::now();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Encoder Pipeline"),
         });
+        println!("Command encoder created: {:?}", encoder_start.elapsed());
 
-        // Initial LayerNorm: Input: A, Output: B.
-        run_gpu_layer_norm(
-            &self.context,
-            &mut encoder,
-            &buffer_a,
-            &buffer_b,
-            (batch_size * seq_len) as u32,
-            hidden_size as u32,
-            config.layer_norm_eps(),
-            embedding_norm_weights.0,
-            embedding_norm_weights.1,
+        // === TEMP BUFFERS ===
+        let temp_start = Instant::now();
+        let temp_buffers = {
+            let qkv_buffer_size = buffer_size as u64;
+            let scores_buffer_size = (batch_size
+                * config.num_attention_heads()
+                * seq_len
+                * seq_len
+                * std::mem::size_of::<f32>()) as u64;
+
+            AttentionTempBuffers {
+                q_proj: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Q Proj"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                k_proj: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("K Proj"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                v_proj: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("V Proj"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                proj_biased: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Proj Biased Temp"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                q_permuted: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Q Permuted"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                k_permuted_t: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("K Permuted T"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                v_permuted: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("V Permuted"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                scores: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Scores"),
+                    size: scores_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                context_vectors: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Context Vectors"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+            }
+        };
+        println!(
+            "Temp buffers (9 buffers) created: {:?}",
+            temp_start.elapsed()
         );
 
-        let mut current_state = &buffer_b;
-        let mut intermediate_state = &buffer_a;
+        // === GPU ENCODING ===
+        let encode_start = Instant::now();
+        let result_buffer = {
+            let cache_start = Instant::now();
+            let mut cache = self.bind_group_cache.lock().unwrap();
+            println!("Mutex lock acquired: {:?}", cache_start.elapsed());
 
-        for layer in layers {
-            // -- Attention Block --
-            encoder.copy_buffer_to_buffer(current_state, 0, &residual_buffer, 0, buffer_size);
-
-            // CORRECT INTEGRATION: Call the full attention block function.
-            run_gpu_attention_block(
-                &self.context,
-                &mut encoder,
-                current_state,
-                intermediate_state,
-                &layer.attention_weights,
-                &mask_buffer,
-                batch_size,
-                seq_len,
-                config.hidden_size(),
-                config.num_attention_heads(),
-            );
-
-            run_gpu_add(
-                &self.context,
-                &mut encoder,
-                intermediate_state,
-                &residual_buffer,
-                current_state,
-                (buffer_size / 4) as u32,
-            );
+            // Initial LayerNorm
+            let norm_start = Instant::now();
             run_gpu_layer_norm(
                 &self.context,
                 &mut encoder,
-                current_state,
-                intermediate_state,
+                &self.pipeline.get(&Pipeline::LayerNorm).unwrap(),
+                &buffer_a,
+                &buffer_b,
                 (batch_size * seq_len) as u32,
                 hidden_size as u32,
                 config.layer_norm_eps(),
-                &layer.attention_weights.norm_weight,
-                &layer.attention_weights.norm_bias,
+                embedding_norm_weights.0,
+                embedding_norm_weights.1,
             );
+            println!("Initial LayerNorm encoded: {:?}", norm_start.elapsed());
 
-            // -- FFN Block --
-            encoder.copy_buffer_to_buffer(intermediate_state, 0, &residual_buffer, 0, buffer_size);
+            let current_state = &buffer_b;
+            let intermediate_state = &buffer_a;
 
-            run_gpu_ffn(
-                &self.context,
-                &mut encoder,
-                intermediate_state,
-                current_state,
-                &layer.ffn_weights,
-                (batch_size * seq_len) as u32,
-                config.hidden_size() as u32,
-                (config.hidden_size() * 4) as u32,
-            );
+            println!("Processing {} layers...", layers.len());
+            for (idx, layer) in layers.iter().enumerate() {
+                let layer_start = Instant::now();
 
-            run_gpu_add(
-                &self.context,
-                &mut encoder,
-                current_state,
-                &residual_buffer,
-                intermediate_state,
-                (buffer_size / 4) as u32,
-            );
-            run_gpu_layer_norm(
-                &self.context,
-                &mut encoder,
-                intermediate_state,
-                current_state,
-                (batch_size * seq_len) as u32,
-                hidden_size as u32,
-                config.layer_norm_eps(),
-                &layer.ffn_weights.norm_weight,
-                &layer.ffn_weights.norm_bias,
-            );
-        }
+                // -- Attention Block --
+                encoder.copy_buffer_to_buffer(current_state, 0, &residual_buffer, 0, buffer_size);
 
-        self.context.queue.submit(std::iter::once(encoder.finish()));
+                run_gpu_attention_block(
+                    &self.context,
+                    &mut encoder,
+                    &self.pipeline,
+                    &mut *cache,
+                    current_state,
+                    intermediate_state,
+                    &layer.attention_weights,
+                    &mask_buffer,
+                    &temp_buffers,
+                    batch_size,
+                    seq_len,
+                    config.hidden_size(),
+                    config.num_attention_heads(),
+                );
+
+                run_gpu_add(
+                    &self.context,
+                    &mut encoder,
+                    &self.pipeline.get(&Pipeline::Add).unwrap(),
+                    intermediate_state,
+                    &residual_buffer,
+                    current_state,
+                    (buffer_size / 4) as u32,
+                );
+                run_gpu_layer_norm(
+                    &self.context,
+                    &mut encoder,
+                    &self.pipeline.get(&Pipeline::LayerNorm).unwrap(),
+                    current_state,
+                    intermediate_state,
+                    (batch_size * seq_len) as u32,
+                    hidden_size as u32,
+                    config.layer_norm_eps(),
+                    &layer.attention_weights.norm_weight,
+                    &layer.attention_weights.norm_bias,
+                );
+
+                // -- FFN Block --
+                encoder.copy_buffer_to_buffer(
+                    intermediate_state,
+                    0,
+                    &residual_buffer,
+                    0,
+                    buffer_size,
+                );
+
+                run_gpu_ffn(
+                    &self.context,
+                    &mut encoder,
+                    &self.pipeline.get(&Pipeline::FFN).unwrap(),
+                    intermediate_state,
+                    current_state,
+                    &layer.ffn_weights,
+                    (batch_size * seq_len) as u32,
+                    config.hidden_size() as u32,
+                    (config.hidden_size() * 4) as u32,
+                );
+
+                run_gpu_add(
+                    &self.context,
+                    &mut encoder,
+                    &self.pipeline.get(&Pipeline::Add).unwrap(),
+                    current_state,
+                    &residual_buffer,
+                    intermediate_state,
+                    (buffer_size / 4) as u32,
+                );
+                run_gpu_layer_norm(
+                    &self.context,
+                    &mut encoder,
+                    &self.pipeline.get(&Pipeline::LayerNorm).unwrap(),
+                    intermediate_state,
+                    current_state,
+                    (batch_size * seq_len) as u32,
+                    hidden_size as u32,
+                    config.layer_norm_eps(),
+                    &layer.ffn_weights.norm_weight,
+                    &layer.ffn_weights.norm_bias,
+                );
+
+                println!("  Layer {} encoded: {:?}", idx, layer_start.elapsed());
+            }
+
+            let submit_start = Instant::now();
+            self.context.queue.submit(std::iter::once(encoder.finish()));
+            println!("Commands submitted to GPU: {:?}", submit_start.elapsed());
+
+            current_state.clone()
+        };
+        println!("Total encoding time: {:?}", encode_start.elapsed());
+
+        // === READBACK ===
+        let read_start = Instant::now();
         let final_ndarray = read_buffer_to_ndarray(
             &self.context,
-            current_state,
+            &result_buffer,
             (batch_size, seq_len, hidden_size),
         )
         .await?;
+        println!("GPU execution + readback: {:?}", read_start.elapsed());
+
+        println!("=== TOTAL FORWARD: {:?} ===\n", total_start.elapsed());
         Ok(final_ndarray)
     }
 }
@@ -206,232 +423,270 @@ impl GpuEncoderPipeline {
 fn run_gpu_attention_block(
     context: &WgpuContext,
     encoder: &mut CommandEncoder,
+    pipeline: &HashMap<Pipeline, Arc<ComputePipeline>>,
+    bind_group_cache: &mut BindGroupCache,
     input: &Buffer,
     output: &Buffer,
     weights: &GpuAttentionWeights,
     mask: &Buffer,
+    temp: &AttentionTempBuffers,
     batch_size: usize,
     seq_len: usize,
     hidden_size: usize,
     num_heads: usize,
 ) {
+    use std::time::Instant;
+    
     let device = &context.device;
     let head_dim = hidden_size / num_heads;
 
-    // --- 1. Create Temporary Buffers ---
-    let qkv_buffer_size = (batch_size * seq_len * hidden_size * std::mem::size_of::<f32>()) as u64;
-    let usage =
-        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
-    let temp_a = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Temp A"),
-        size: qkv_buffer_size,
-        usage,
-        mapped_at_creation: false,
-    });
-    let temp_b = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Temp B"),
-        size: qkv_buffer_size,
-        usage,
-        mapped_at_creation: false,
-    });
-    // Buffers for matmul results
-    let q_proj = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Q Proj"),
-        size: qkv_buffer_size,
-        usage,
-        mapped_at_creation: false,
-    });
-    let k_proj = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("K Proj"),
-        size: qkv_buffer_size,
-        usage,
-        mapped_at_creation: false,
-    });
-    let v_proj = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("V Proj"),
-        size: qkv_buffer_size,
-        usage,
-        mapped_at_creation: false,
-    });
-
-    // A reusable temporary buffer for the results of bias additions
-    let proj_biased = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Proj Biased Temp"),
-        size: qkv_buffer_size,
-        usage,
-        mapped_at_creation: false,
-    });
-
-    let q_permuted = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Q Permuted"),
-        size: qkv_buffer_size,
-        usage,
-        mapped_at_creation: false,
-    });
-    let k_permuted_t = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("K Permuted T"),
-        size: qkv_buffer_size,
-        usage,
-        mapped_at_creation: false,
-    });
-    let v_permuted = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("V Permuted"),
-        size: qkv_buffer_size,
-        usage,
-        mapped_at_creation: false,
-    });
-
-    let scores_buffer_size =
-        (batch_size * num_heads * seq_len * seq_len * std::mem::size_of::<f32>()) as u64;
-    let scores = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Scores"),
-        size: scores_buffer_size,
-        usage,
-        mapped_at_creation: false,
-    });
-
-    let context_vectors = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Context Vectors"),
-        size: qkv_buffer_size,
-        usage,
-        mapped_at_creation: false,
-    });
-
-    // --- 2. Q, K, V Projections with Bias ---
     let m = (batch_size * seq_len) as u32;
     let k = hidden_size as u32;
-    let n = hidden_size as u32;
 
     // Q = Input * Wq + Bq
-    run_gpu_matmul(context, encoder, input, &weights.q_weight, &temp_a, m, k, k);
-    run_gpu_add_bias(context, encoder, &temp_a, &weights.q_bias, &temp_b, m * k);
+    // Q Path: input -> q_proj -> proj_biased -> q_permuted
+    let start = Instant::now();
+    run_gpu_matmul(
+        context,
+        encoder,
+        pipeline.get(&Pipeline::MatMul).unwrap(),
+        bind_group_cache,
+        input,
+        &weights.q_weight,
+        &temp.q_proj,
+        m,
+        k,
+        k,
+    );
+    println!("      Q matmul: {:?}", start.elapsed());
+    
+    let start = Instant::now();
+    run_gpu_add_bias(
+        context,
+        encoder,
+        pipeline.get(&Pipeline::AddBias).unwrap(),
+        &temp.q_proj,
+        &weights.q_bias,
+        &temp.proj_biased,
+        m * k,
+    );
+    println!("      Q bias: {:?}", start.elapsed());
+    
+    let start = Instant::now();
     run_gpu_reshape(
         context,
         encoder,
-        &temp_b,
-        &q_permuted,
+        pipeline.get(&Pipeline::Reshape).unwrap(),
+        &temp.proj_biased,
+        &temp.q_permuted,
         batch_size as u32,
         seq_len as u32,
         num_heads as u32,
         head_dim as u32,
         false,
     );
+    println!("      Q reshape: {:?}", start.elapsed());
 
-    // K Path: input -> temp_a -> temp_b -> k_permuted_t
-    run_gpu_matmul(context, encoder, input, &weights.k_weight, &temp_a, m, k, k);
-    run_gpu_add_bias(context, encoder, &temp_a, &weights.k_bias, &temp_b, m * k);
+    // K Path: input -> k_proj -> proj_biased -> k_permuted_t
+    let start = Instant::now();
+    run_gpu_matmul(
+        context,
+        encoder,
+        pipeline.get(&Pipeline::MatMul).unwrap(),
+        bind_group_cache,
+        input,
+        &weights.k_weight,
+        &temp.k_proj,
+        m,
+        k,
+        k,
+    );
+    println!("      K matmul: {:?}", start.elapsed());
+    
+    let start = Instant::now();
+    run_gpu_add_bias(
+        context,
+        encoder,
+        pipeline.get(&Pipeline::AddBias).unwrap(),
+        &temp.k_proj,
+        &weights.k_bias,
+        &temp.proj_biased,
+        m * k,
+    );
+    println!("      K bias: {:?}", start.elapsed());
+    
+    let start = Instant::now();
     run_gpu_reshape(
         context,
         encoder,
-        &temp_b,
-        &k_permuted_t,
+        pipeline.get(&Pipeline::Reshape).unwrap(),
+        &temp.proj_biased,
+        &temp.k_permuted_t,
         batch_size as u32,
         seq_len as u32,
         num_heads as u32,
         head_dim as u32,
         true,
     );
+    println!("      K reshape: {:?}", start.elapsed());
 
-    // V Path: input -> temp_a -> temp_b -> v_permuted
-    run_gpu_matmul(context, encoder, input, &weights.v_weight, &temp_a, m, k, k);
-    run_gpu_add_bias(context, encoder, &temp_a, &weights.v_bias, &temp_b, m * k);
+    // V Path: input -> v_proj -> proj_biased -> v_permuted
+    let start = Instant::now();
+    run_gpu_matmul(
+        context,
+        encoder,
+        pipeline.get(&Pipeline::MatMul).unwrap(),
+        bind_group_cache,
+        input,
+        &weights.v_weight,
+        &temp.v_proj,
+        m,
+        k,
+        k,
+    );
+    println!("      V matmul: {:?}", start.elapsed());
+    
+    let start = Instant::now();
+    run_gpu_add_bias(
+        context,
+        encoder,
+        pipeline.get(&Pipeline::AddBias).unwrap(),
+        &temp.v_proj,
+        &weights.v_bias,
+        &temp.proj_biased,
+        m * k,
+    );
+    println!("      V bias: {:?}", start.elapsed());
+    
+    let start = Instant::now();
     run_gpu_reshape(
         context,
         encoder,
-        &temp_b,
-        &v_permuted,
+        pipeline.get(&Pipeline::Reshape).unwrap(),
+        &temp.proj_biased,
+        &temp.v_permuted,
         batch_size as u32,
         seq_len as u32,
         num_heads as u32,
         head_dim as u32,
         false,
     );
+    println!("      V reshape: {:?}", start.elapsed());
 
     // --- 3. Attention Scores: Q @ K^T ---
+    let start = Instant::now();
     run_gpu_bmm(
         context,
         encoder,
-        &q_permuted,
-        &k_permuted_t,
-        &scores,
+        pipeline.get(&Pipeline::BMM).unwrap(),
+        bind_group_cache,
+        &temp.q_permuted,
+        &temp.k_permuted_t,
+        &temp.scores,
         (batch_size * num_heads) as u32,
         seq_len as u32,
         head_dim as u32,
         seq_len as u32,
     );
+    println!("      Scores BMM (Q@K^T): {:?}", start.elapsed());
 
+    // --- 4. Apply Mask ---
+    let start = Instant::now();
     run_gpu_apply_mask(
         context,
         encoder,
-        &scores,
+        pipeline.get(&Pipeline::ApplyMask).unwrap(),
+        &temp.scores,
         mask,
         batch_size as u32,
         num_heads as u32,
         seq_len as u32,
     );
+    println!("      Apply mask: {:?}", start.elapsed());
 
-    // 4. Softmax (in-place on scores)
+    // --- 5. Softmax (in-place on scores) ---
+    let start = Instant::now();
     let scale = 1.0 / (head_dim as f32).sqrt();
     run_gpu_softmax(
         context,
         encoder,
-        &scores,
+        pipeline.get(&Pipeline::Softmax).unwrap(),
+        &temp.scores,
         (batch_size * num_heads * seq_len) as u32,
         seq_len as u32,
         scale,
     );
+    println!("      Softmax: {:?}", start.elapsed());
 
-    // 5. Apply Scores to V: Scores @ V -> context_vectors
+    // --- 6. Apply Scores to V: Scores @ V ---
+    let start = Instant::now();
     run_gpu_bmm(
         context,
         encoder,
-        &scores,
-        &v_permuted,
-        &context_vectors,
+        pipeline.get(&Pipeline::BMM).unwrap(),
+        bind_group_cache,
+        &temp.scores,
+        &temp.v_permuted,
+        &temp.context_vectors,
         (batch_size * num_heads) as u32,
         seq_len as u32,
         seq_len as u32,
         head_dim as u32,
     );
+    println!("      Context BMM (Scores@V): {:?}", start.elapsed());
 
-    // 6. "Un-reshape" and Output Projection
+    // --- 7. "Un-reshape" and Output Projection ---
+    let start = Instant::now();
     run_gpu_unreshape(
         context,
         encoder,
-        &context_vectors,
-        &temp_a,
+        pipeline.get(&Pipeline::Unreshape).unwrap(),
+        &temp.context_vectors,
+        &temp.proj_biased,
         batch_size as u32,
         seq_len as u32,
         num_heads as u32,
         head_dim as u32,
     );
+    println!("      Unreshape: {:?}", start.elapsed());
+
+    // Use `temp.q_proj` as a temporary buffer for the matmul result before the final bias add.
+    let start = Instant::now();
     run_gpu_matmul(
         context,
         encoder,
-        &temp_a,
+        pipeline.get(&Pipeline::MatMul).unwrap(),
+        bind_group_cache,
+        &temp.proj_biased,
         &weights.output_weight,
-        &temp_b,
+        &temp.q_proj,
         m,
         k,
         k,
     );
+    println!("      Output matmul: {:?}", start.elapsed());
+
+    // The final result is written to the main `output` buffer.
+    let start = Instant::now();
     run_gpu_add_bias(
         context,
         encoder,
-        &temp_b,
+        pipeline.get(&Pipeline::AddBias).unwrap(),
+        &temp.q_proj,
         &weights.output_bias,
         output,
         m * k,
     );
+    println!("      Output bias: {:?}", start.elapsed());
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FeedForward, LayerNorm, wgpu_context::WgpuContext};
+    use crate::{FeedForward, LayerNorm, gpu_ops::softmax, wgpu_context::WgpuContext};
     use ndarray::{Array, Array1, Array2, Array3};
     use ndarray_rand::RandomExt;
-    use rand_distr::Uniform; // <--- this is the correct one
+    use rand_distr::Uniform;
+    use tokio::net::unix::pipe; // <--- this is the correct one
 
     /// A helper function to get a WGPU context for testing.
     /// Panics if a GPU adapter cannot be found.
@@ -542,9 +797,16 @@ mod tests {
         // b) Record the GPU commands
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let matmul_pipeline = compile_matmul_pipeline(&context);
+        let add_bias_pipeline = compile_add_bias_pipeline(&context);
+        let reshape_pipeline = compile_reshape_pipeline(&context);
+        let cache = Mutex::new(BindGroupCache::with_capacity(256, 16));
+        let mut c = cache.lock().unwrap();
         run_gpu_matmul(
             &context,
             &mut encoder,
+            &matmul_pipeline,
+            &mut *c,
             &input_gpu,
             &q_weight_gpu,
             &q_proj_gpu,
@@ -555,6 +817,7 @@ mod tests {
         run_gpu_add_bias(
             &context,
             &mut encoder,
+            &add_bias_pipeline,
             &q_proj_gpu,
             &q_bias_gpu,
             &q_biased_gpu,
@@ -563,6 +826,7 @@ mod tests {
         run_gpu_reshape(
             &context,
             &mut encoder,
+            &reshape_pipeline,
             &q_biased_gpu,
             &q_permuted_gpu,
             batch_size as u32,
@@ -698,9 +962,16 @@ mod tests {
 
         let mut encoder_q =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let matmul_pipeline = compile_matmul_pipeline(&context);
+        let add_bias_pipeline = compile_add_bias_pipeline(&context);
+        let reshape_pipeline = compile_reshape_pipeline(&context);
+        let cache = Mutex::new(BindGroupCache::with_capacity(256, 16));
+        let mut c = cache.lock().unwrap();
         run_gpu_matmul(
             &context,
             &mut encoder_q,
+            &matmul_pipeline,
+            &mut *c,
             &input_gpu,
             &q_weight_gpu,
             &q_proj,
@@ -711,6 +982,7 @@ mod tests {
         run_gpu_add_bias(
             &context,
             &mut encoder_q,
+            &add_bias_pipeline,
             &q_proj,
             &q_bias_gpu,
             &proj_biased,
@@ -719,6 +991,7 @@ mod tests {
         run_gpu_reshape(
             &context,
             &mut encoder_q,
+            &reshape_pipeline,
             &proj_biased,
             &q_permuted,
             batch_size as u32,
@@ -757,6 +1030,8 @@ mod tests {
         run_gpu_matmul(
             &context,
             &mut encoder_k,
+            &matmul_pipeline,
+            &mut *c,
             &input_gpu,
             &k_weight_gpu,
             &k_proj,
@@ -767,6 +1042,7 @@ mod tests {
         run_gpu_add_bias(
             &context,
             &mut encoder_k,
+            &add_bias_pipeline,
             &k_proj,
             &k_bias_gpu,
             &proj_biased,
@@ -775,6 +1051,7 @@ mod tests {
         run_gpu_reshape(
             &context,
             &mut encoder_k,
+            &reshape_pipeline,
             &proj_biased,
             &k_permuted_t,
             batch_size as u32,
@@ -817,7 +1094,7 @@ mod tests {
                 }
             }
         }
-
+        let bmm_pipline = compile_bmm_pipeline(&context);
         let mut encoder_scores =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
@@ -825,6 +1102,8 @@ mod tests {
         run_gpu_bmm(
             &context,
             &mut encoder_scores,
+            &bmm_pipline,
+            &mut c,
             &q_permuted,
             &k_permuted_t,
             &scores_gpu,
@@ -833,10 +1112,11 @@ mod tests {
             head_dim as u32,                 // K
             seq_len as u32,                  // N
         );
-
+        let softmax_pipeline = compile_softmax_pipeline(&context);
         run_gpu_softmax(
             &context,
             &mut encoder_scores,
+            &softmax_pipeline,
             &scores_gpu,
             (batch_size * num_heads * seq_len) as u32,
             seq_len as u32,
@@ -951,15 +1231,118 @@ mod tests {
         let cpu_result = cpu_attention.forward(&input_cpu, None, Some(&attention_mask_cpu))?;
 
         // == GPU Path ==
+        let mask_gpu = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Test Attention Mask"),
+            contents: bytemuck::cast_slice(attention_mask_cpu.as_slice().unwrap()),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Attention Test Encoder"),
         });
+        let usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST;
+        let mut pipeline: HashMap<Pipeline, Arc<ComputePipeline>> = HashMap::new();
+        let cache = Mutex::new(BindGroupCache::with_capacity(256, 16));
+        pipeline.insert(
+            Pipeline::MatMul,
+            Arc::new(compile_matmul_pipeline(&context)),
+        );
+        pipeline.insert(
+            Pipeline::AddBias,
+            Arc::new(compile_add_bias_pipeline(&context)),
+        );
+        pipeline.insert(
+            Pipeline::Reshape,
+            Arc::new(compile_reshape_pipeline(&context)),
+        );
+        pipeline.insert(Pipeline::BMM, Arc::new(compile_bmm_pipeline(&context)));
+        pipeline.insert(
+            Pipeline::Softmax,
+            Arc::new(compile_softmax_pipeline(&context)),
+        );
+        pipeline.insert(
+            Pipeline::ApplyMask,
+            Arc::new(compile_apply_mask_pipeline(&context)),
+        );
+        pipeline.insert(
+            Pipeline::Unreshape,
+            Arc::new(compile_unreshape_pipeline(&context)),
+        );
+        pipeline.insert(Pipeline::Add, Arc::new(compile_add_pipeline(&context)));
+        let temp_buffers = {
+            let qkv_buffer_size =
+                (batch_size * seq_len * hidden_size * std::mem::size_of::<f32>()) as u64;
+            let scores_buffer_size =
+                (batch_size * num_heads * seq_len * seq_len * std::mem::size_of::<f32>()) as u64;
+            AttentionTempBuffers {
+                q_proj: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Test Q Proj"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                k_proj: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Test K Proj"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                v_proj: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Test V Proj"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                proj_biased: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Test Proj Biased"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                q_permuted: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Test Q Permuted"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                k_permuted_t: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Test K Permuted T"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                v_permuted: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Test V Permuted"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                scores: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Test Scores"),
+                    size: scores_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+                context_vectors: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Test Context Vectors"),
+                    size: qkv_buffer_size,
+                    usage,
+                    mapped_at_creation: false,
+                }),
+            }
+        };
+        let mut c = cache.lock().unwrap();
         run_gpu_attention_block(
             &context,
             &mut encoder,
+            &pipeline,
+            &mut *c,
             &input_gpu,
             &output_gpu,
             &gpu_weights,
+            &mask_gpu,
+            &temp_buffers,
             batch_size,
             seq_len,
             hidden_size,

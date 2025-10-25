@@ -31,10 +31,15 @@ impl CpuTransformerEncoder {
     {
         // Load embedding weights using the names provided by the config.
         let (word_w, pos_w, type_w) = config.get_embedding_weight_names();
+        let token_type_embeddings = if type_w.is_empty() {
+            Array2::zeros((0, config.hidden_size())) // Empty for RoBERTa
+        } else {
+            weights.get_array2(type_w)?
+        };
         let embeddings = Embeddings::new(
             weights.get_array2(word_w)?,
             weights.get_array2(pos_w)?,
-            weights.get_array2(type_w)?,
+            Some(token_type_embeddings),
         );
 
         let (norm_w, norm_b) = config.get_embedding_layer_norm_names();

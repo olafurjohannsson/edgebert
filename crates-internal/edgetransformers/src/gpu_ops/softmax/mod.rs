@@ -1,30 +1,9 @@
-use wgpu::util::DeviceExt;
-use wgpu::{Buffer, CommandEncoder, include_wgsl};
 use crate::wgpu_context::WgpuContext;
 use std::sync::Arc;
+use wgpu::util::DeviceExt;
+use wgpu::{Buffer, CommandEncoder, ComputePipeline, include_wgsl};
 
-
-/// A self-contained helper to run the `softmax.wgsl` shader.
-///
-/// This kernel performs a numerically-stable softmax operation in-place on a buffer.
-/// It also applies the attention scaling factor.
-pub fn run_gpu_softmax(
-    context: &WgpuContext,
-    encoder: &mut CommandEncoder,
-    data: &Buffer, // The buffer to operate on in-place
-    rows: u32,
-    cols: u32,
-    scale: f32,
-) {
-    #[repr(C)]
-    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-    struct SoftmaxUniforms {
-        rows: u32,
-        cols: u32,
-        scale: f32,
-        _padding: u32,
-    }
-
+pub fn compile_softmax_pipeline(context: &WgpuContext) -> ComputePipeline {
     let device = &context.device;
     let shader = device.create_shader_module(include_wgsl!("./softmax.wgsl"));
 
@@ -69,6 +48,32 @@ pub fn run_gpu_softmax(
         compilation_options: Default::default(),
         cache: None,
     });
+    pipeline
+}
+
+/// A self-contained helper to run the `softmax.wgsl` shader.
+///
+/// This kernel performs a numerically-stable softmax operation in-place on a buffer.
+/// It also applies the attention scaling factor.
+pub fn run_gpu_softmax(
+    context: &WgpuContext,
+    encoder: &mut CommandEncoder,
+    pipeline: &ComputePipeline,
+    data: &Buffer, // The buffer to operate on in-place
+    rows: u32,
+    cols: u32,
+    scale: f32,
+) {
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+    struct SoftmaxUniforms {
+        rows: u32,
+        cols: u32,
+        scale: f32,
+        _padding: u32,
+    }
+
+    let device = &context.device;
 
     let uniforms = SoftmaxUniforms {
         rows,
@@ -84,7 +89,7 @@ pub fn run_gpu_softmax(
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Softmax Bind Group"),
-        layout: &bind_group_layout,
+        layout: &pipeline.get_bind_group_layout(0),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,

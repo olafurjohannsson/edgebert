@@ -16,32 +16,80 @@ use tokenizers::Tokenizer;
 
 use edgetransformers::wgpu_context::WgpuContext;
 mod config;
-pub use config::BertConfig;
+pub use config::{BertConfig, RobertaConfig, BertBaseConfig};
 
-/// An application wrapper that provides BERT bi-encoder functionality.
+/// An application wrapper that provides bi-encoder functionality.
 ///
 /// This struct composes a generic `TransformerEncoder` with a tokenizer and
 /// the necessary pooling logic to produce sentence embeddings.
-pub struct BertBiEncoder {
+pub struct BiEncoder {
     base_encoder: TransformerEncoder,
     tokenizer: Tokenizer,
 }
 
-impl BertBiEncoder {
-    /// Creates a new `BertBiEncoder`
+
+// todo: use 
+// #[derive(Debug, Clone)]
+// pub enum Model {
+//     // Sentence Transformers
+//     MiniLML6V2,
+//     MPNetBaseV2,
+    
+//     // Base BERT models
+//     BertBaseUncased,
+//     BertBaseCased,
+//     BertLargeUncased,
+    
+//     // RoBERTa
+//     RobertaBase,
+//     RobertaLarge,
+    
+//     /// Custom model from HuggingFace Hub
+//     Custom(String),
+// }
+
+impl BiEncoder { // todo: change to sentenceEncoder
+    /// Creates a new `BiEncoder`
     pub fn from_pretrained(
         model_path: &Path,
         device: Device,
         context: Option<Arc<WgpuContext>>,
     ) -> Result<Self> {
         let weights = ModelWeights::new(model_path)?;
+        println!("\n=== Available Tensors ===");
+        let mut keys: Vec<_> = weights.tensors.keys().collect();
+        keys.sort();
+        for key in keys.iter().take(30) {
+            // Show first 30
+            println!("  {}", key);
+        }
+        println!("Total tensors: {}", weights.tensors.len());
+        println!("========================\n");
         let config: BertConfig = serde_json::from_str(&weights.config_json)?;
         let tokenizer = Tokenizer::from_file(model_path.join("tokenizer.json"))
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-        // Create the generic encoder, passing the specific BertConfig.
-        let base_encoder = TransformerEncoder::new(&weights, Arc::new(config), device, context)?;
+          // Auto-detect architecture from tensor names
+        let sample_keys: Vec<_> = weights.tensors.keys().take(5).collect();
+        
+        let has_bert_prefix = sample_keys.iter().any(|k| k.starts_with("bert."));
+        let has_gamma_beta = sample_keys.iter().any(|k| k.contains("gamma") || k.contains("beta"));
+        let has_token_type = weights.tensors.contains_key("embeddings.token_type_embeddings.weight") 
+            || weights.tensors.contains_key("bert.embeddings.token_type_embeddings.weight");
 
+        let base_encoder = if has_bert_prefix && has_gamma_beta {
+            println!("Detected: BERT (TensorFlow-style with bert. prefix)");
+            let config: BertBaseConfig = serde_json::from_str(&weights.config_json)?;
+            TransformerEncoder::new(&weights, Arc::new(config), device, context)?
+        } else if has_token_type {
+            println!("Detected: BERT (HuggingFace-style)");
+            let config: BertConfig = serde_json::from_str(&weights.config_json)?;
+            TransformerEncoder::new(&weights, Arc::new(config), device, context)?
+        } else {
+            println!("Detected: RoBERTa/MPNet");
+            let config: RobertaConfig = serde_json::from_str(&weights.config_json)?;
+            TransformerEncoder::new(&weights, Arc::new(config), device, context)?
+        };
         Ok(Self {
             base_encoder,
             tokenizer,

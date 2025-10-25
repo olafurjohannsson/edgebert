@@ -34,19 +34,18 @@ async fn test_ffn_correctness() -> Result<()> {
         Array::random((intermediate_size, hidden_size), Uniform::new(-0.5, 0.5));
     let output_b_cpu: Array1<f32> = Array::random(hidden_size, Uniform::new(-0.5, 0.5));
 
-    // --- THIS IS THE FIX ---
-    // We must ensure the transposed array has a standard memory layout before calling .as_slice().
+    
     let intermediate_w = intermediate_w_cpu.as_standard_layout().to_owned();
     let output_w = output_w_cpu.as_standard_layout().to_owned();
 
-    // Now, the `.as_slice().unwrap()` calls are guaranteed to succeed.
+    
     let mut packed_ffn_data: Vec<f32> = Vec::new();
     packed_ffn_data.extend_from_slice(intermediate_w.as_slice().unwrap());
     packed_ffn_data.extend_from_slice(intermediate_b_cpu.as_slice().unwrap());
     packed_ffn_data.extend_from_slice(output_w.as_slice().unwrap());
     packed_ffn_data.extend_from_slice(output_b_cpu.as_slice().unwrap());
 
-    // --- Upload GPU data (no changes here) ---
+    
     let input_gpu = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Test FFN Input"),
         contents: bytemuck::cast_slice(input_cpu.as_slice().unwrap()),
@@ -66,8 +65,6 @@ async fn test_ffn_correctness() -> Result<()> {
         mapped_at_creation: false,
     });
 
-    // Create dummy GpuFeedForwardWeights for the test. The norm weights are not used
-    // by `run_gpu_ffn`, but the struct requires them.
     let dummy_norm_w_cpu: Array1<f32> = Array1::zeros(hidden_size);
     let dummy_norm_b_cpu: Array1<f32> = Array1::zeros(hidden_size);
 
@@ -88,7 +85,6 @@ async fn test_ffn_correctness() -> Result<()> {
         norm_bias: Arc::new(dummy_norm_b_gpu),
     };
 
-    // --- 2. Act ---
     let cpu_ffn = FeedForward::new(
         intermediate_w,
         intermediate_b_cpu.clone(),
@@ -100,9 +96,13 @@ async fn test_ffn_correctness() -> Result<()> {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("FFN Test Encoder"),
     });
+
+    let pipeline = compile_ffn_pipeline(&context);
+
     run_gpu_ffn(
         &context,
         &mut encoder,
+        &pipeline,
         &input_gpu,
         &output_gpu,
         &gpu_weights,

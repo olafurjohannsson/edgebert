@@ -1,28 +1,9 @@
 use wgpu::util::DeviceExt;
-use wgpu::{Buffer, CommandEncoder, include_wgsl};
+use wgpu::{Buffer, CommandEncoder, include_wgsl, ComputePipeline};
 use crate::wgpu_context::WgpuContext;
 use std::sync::Arc;
 
-
-/// A self-contained helper to run the `add_bias.wgsl` shader.
-///
-/// This kernel adds a 1D bias vector to a 2D matrix (`output = input + bias`).
-/// It is used after matrix multiplication in projection layers.
-pub fn run_gpu_add_bias(
-    context: &WgpuContext,
-    encoder: &mut CommandEncoder,
-    input: &Buffer,
-    bias: &Buffer,
-    output: &Buffer,
-    size: u32,
-) {
-    #[repr(C)]
-    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Uniforms {
-        size: u32,
-        _padding: [u32; 3],
-    }
-
+pub fn compile_add_bias_pipeline(context: &WgpuContext) -> ComputePipeline {
     let device = &context.device;
     let shader = device.create_shader_module(include_wgsl!("./add_bias.wgsl"));
 
@@ -91,6 +72,32 @@ pub fn run_gpu_add_bias(
         cache: None,
     });
 
+    pipeline
+}
+
+/// A self-contained helper to run the `add_bias.wgsl` shader.
+///
+/// This kernel adds a 1D bias vector to a 2D matrix (`output = input + bias`).
+/// It is used after matrix multiplication in projection layers.
+pub fn run_gpu_add_bias(
+    context: &WgpuContext,
+    encoder: &mut CommandEncoder,
+    pipeline: &ComputePipeline,
+    input: &Buffer,
+    bias: &Buffer,
+    output: &Buffer,
+    size: u32,
+) {
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Uniforms {
+        size: u32,
+        _padding: [u32; 3],
+    }
+
+    let device = &context.device;
+    
+
     let uniforms = Uniforms {
         size,
         _padding: [0; 3],
@@ -103,7 +110,7 @@ pub fn run_gpu_add_bias(
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Add Bias Bind Group"),
-        layout: &bind_group_layout,
+        layout: &pipeline.get_bind_group_layout(0),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,

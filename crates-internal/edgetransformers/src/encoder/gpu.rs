@@ -12,10 +12,8 @@ use crate::traits::{
 use crate::weights::ModelWeights;
 use crate::wgpu_context::WgpuContext;
 // Import the new generic components
-use crate::gpu_pipeline::{
-    GpuAttentionWeights, GpuEncoderPipeline, GpuTransformerLayer
-};
 use crate::gpu_ops::ffn::GpuFeedForwardWeights;
+use crate::gpu_pipeline::{GpuAttentionWeights, GpuEncoderPipeline, GpuTransformerLayer};
 
 /// The GPU backend for a generic Transformer Encoder.
 /// It holds the GPU-native weights and the generic pipeline to execute them.
@@ -83,7 +81,11 @@ impl GpuTransformerEncoder {
         let (word_w, pos_w, type_w) = config.get_embedding_weight_names();
         let word_embeddings = weights.get_array2(word_w)?;
         let position_embeddings = weights.get_array2(pos_w)?;
-        let token_type_embeddings = weights.get_array2(type_w)?;
+        let token_type_embeddings = if type_w.is_empty() {
+            Array2::zeros((0, config.hidden_size())) // Empty for RoBERTa
+        } else {
+            weights.get_array2(type_w)?
+        };
 
         // Upload embedding norm weights
         let (norm_w, norm_b) = config.get_embedding_layer_norm_names();
@@ -118,16 +120,18 @@ impl GpuTransformerEncoder {
                 // For BERT: Transpose [out, in] -> [in, out] to match the shader's expectation.
                 let intermediate_w_t = intermediate_w.t().as_standard_layout().to_owned();
                 let output_w_t = output_w.t().as_standard_layout().to_owned();
-                
+
                 packed_ffn_data.extend_from_slice(intermediate_w_t.as_slice().unwrap());
                 packed_ffn_data.extend_from_slice(intermediate_b.as_slice().unwrap());
                 packed_ffn_data.extend_from_slice(output_w_t.as_slice().unwrap());
                 packed_ffn_data.extend_from_slice(output_b.as_slice().unwrap());
             } else {
                 // For GPT-2 style models: Use weights as-is.
-                packed_ffn_data.extend_from_slice(intermediate_w.as_standard_layout().as_slice().unwrap());
+                packed_ffn_data
+                    .extend_from_slice(intermediate_w.as_standard_layout().as_slice().unwrap());
                 packed_ffn_data.extend_from_slice(intermediate_b.as_slice().unwrap());
-                packed_ffn_data.extend_from_slice(output_w.as_standard_layout().as_slice().unwrap());
+                packed_ffn_data
+                    .extend_from_slice(output_w.as_standard_layout().as_slice().unwrap());
                 packed_ffn_data.extend_from_slice(output_b.as_slice().unwrap());
             }
             // packed_ffn_data

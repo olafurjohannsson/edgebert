@@ -51,9 +51,13 @@ async fn test_add_correctness() -> Result<()> {
 
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+    let pipeline = compile_add_pipeline(&context);
+    
     run_gpu_add(
         &context,
         &mut encoder,
+        &pipeline,
         &input_a_gpu,
         &input_b_gpu,
         &output_gpu,

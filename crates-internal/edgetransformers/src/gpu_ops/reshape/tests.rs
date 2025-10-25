@@ -68,9 +68,11 @@ async fn test_reshape_unreshape_correctness() -> Result<()> {
 
     let mut encoder1 =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let pipeline = compile_reshape_pipeline(&context);
     run_gpu_reshape(
         &context,
         &mut encoder1,
+        &pipeline,
         &input_gpu,
         &reshaped_gpu,
         b as u32,
@@ -94,9 +96,11 @@ async fn test_reshape_unreshape_correctness() -> Result<()> {
     // --- Part B: Verify Unreshape is the inverse of Reshape ---
     let mut encoder2 =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let pipeline = compile_unreshape_pipeline(&context);
     run_gpu_unreshape(
         &context,
         &mut encoder2,
+        &pipeline,
         &reshaped_gpu,
         &unreshaped_gpu,
         b as u32,
@@ -167,9 +171,11 @@ async fn test_reshape_correctness() -> Result<()> {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("Reshape Test Encoder"),
     });
+    let pipeline = compile_reshape_pipeline(&context);
     run_gpu_reshape(
         &context,
         &mut encoder,
+        &pipeline,
         &input_gpu,
         &output_gpu,
         b as u32,
@@ -233,11 +239,12 @@ async fn test_unreshape_is_inverse_of_reshape() -> Result<()> {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("Inverse Test Encoder"),
     });
-
+    let pipeline = compile_reshape_pipeline(&context);
     // Run reshape: original -> reshaped
     run_gpu_reshape(
         &context,
         &mut encoder,
+        &pipeline,
         &original_gpu,
         &reshaped_gpu,
         b as u32,
@@ -246,11 +253,12 @@ async fn test_unreshape_is_inverse_of_reshape() -> Result<()> {
         d as u32,
         false,
     );
-
+    let pipeline1 = compile_unreshape_pipeline(&context);
     // Run unreshape: reshaped -> final
     run_gpu_unreshape(
         &context,
         &mut encoder,
+        &pipeline1,
         &reshaped_gpu,
         &final_gpu,
         b as u32,
@@ -261,8 +269,7 @@ async fn test_unreshape_is_inverse_of_reshape() -> Result<()> {
 
     context.queue.submit(std::iter::once(encoder.finish()));
 
-    let gpu_final_array =
-        read_buffer_to_ndarray(&context, &final_gpu, (b, s, hidden_size)).await?;
+    let gpu_final_array = read_buffer_to_ndarray(&context, &final_gpu, (b, s, hidden_size)).await?;
 
     // --- 3. Assert ---
     println!("Verifying Unreshape is the inverse of Reshape...");

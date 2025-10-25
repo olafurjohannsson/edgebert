@@ -35,7 +35,7 @@ impl BertBase {
         ))?;
 
         let embeddings =
-            Embeddings::new(word_embeddings, position_embeddings, token_type_embeddings);
+            Embeddings::new(word_embeddings, position_embeddings, Some(token_type_embeddings));
 
         let embeddings_layer_norm = LayerNorm::new(
             weights.get_array1(&format!("{}{}", layer_prefix, "embeddings.LayerNorm.weight"))?,

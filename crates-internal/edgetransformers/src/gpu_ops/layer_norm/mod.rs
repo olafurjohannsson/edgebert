@@ -1,28 +1,8 @@
-
-use wgpu::util::DeviceExt;
-use wgpu::{Buffer, CommandEncoder, include_wgsl};
 use crate::wgpu_context::WgpuContext;
+use wgpu::util::DeviceExt;
+use wgpu::{Buffer, CommandEncoder, ComputePipeline, include_wgsl};
 
-pub fn run_gpu_layer_norm(
-    context: &WgpuContext,
-    encoder: &mut CommandEncoder,
-    input: &Buffer,
-    output: &Buffer,
-    rows: u32,
-    cols: u32,
-    eps: f32,
-    gamma: &Buffer,
-    beta: &Buffer,
-) {
-    #[repr(C)]
-    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-    struct NormUniforms {
-        m: u32,
-        n: u32,
-        eps: f32,
-        _padding: u32,
-    }
-
+pub fn compile_layer_norm_pipeline(context: &WgpuContext) -> ComputePipeline {
     let device = &context.device;
     let shader = device.create_shader_module(include_wgsl!("./layer_norm.wgsl"));
 
@@ -96,6 +76,31 @@ pub fn run_gpu_layer_norm(
         compilation_options: Default::default(),
         cache: None,
     });
+    pipeline
+}
+
+pub fn run_gpu_layer_norm(
+    context: &WgpuContext,
+    encoder: &mut CommandEncoder,
+    pipeline: &ComputePipeline,
+    input: &Buffer,
+    output: &Buffer,
+    rows: u32,
+    cols: u32,
+    eps: f32,
+    gamma: &Buffer,
+    beta: &Buffer,
+) {
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+    struct NormUniforms {
+        m: u32,
+        n: u32,
+        eps: f32,
+        _padding: u32,
+    }
+
+    let device = &context.device;
 
     let uniforms = NormUniforms {
         m: rows,

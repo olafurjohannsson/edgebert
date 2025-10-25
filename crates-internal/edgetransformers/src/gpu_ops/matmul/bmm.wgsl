@@ -10,10 +10,10 @@ struct MatmulInfo {
 @group(0) @binding(2) var<storage, read> b_in: array<f32>;
 @group(0) @binding(3) var<storage, read_write> c_out: array<f32>;
 
-var<workgroup> a_tile: array<array<f32, 16>, 16>;
-var<workgroup> b_tile: array<array<f32, 16>, 16>;
+var<workgroup> a_tile: array<array<f32, 32>, 32>;
+var<workgroup> b_tile: array<array<f32, 32>, 32>;
 
-@compute @workgroup_size(16, 16, 1)
+@compute @workgroup_size(32, 32, 1)
 fn main(
     @builtin(workgroup_id) group_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>
@@ -25,15 +25,15 @@ fn main(
     let b_batch_offset = b_idx * info.k * info.n;
     let c_batch_offset = b_idx * info.m * info.n;
 
-    let global_row = group_id.y * 16u + local_id.y;
-    let global_col = group_id.x * 16u + local_id.x;
+    let global_row = group_id.y * 32u + local_id.y;
+    let global_col = group_id.x * 32u + local_id.x;
 
     var acc = 0.0;
-    let num_tiles = (info.k + 15u) / 16u;
+    let num_tiles = (info.k + 15u) / 32u;
 
     for (var t = 0u; t < num_tiles; t = t + 1u) {
-        let a_col = t * 16u + local_id.x;
-        let b_row = t * 16u + local_id.y;
+        let a_col = t * 32u + local_id.x;
+        let b_row = t * 32u + local_id.y;
 
         if (global_row < info.m && a_col < info.k) {
             a_tile[local_id.y][local_id.x] = a_in[a_batch_offset + global_row * info.k + a_col];
@@ -49,7 +49,7 @@ fn main(
 
         workgroupBarrier();
 
-        for (var i = 0u; i < 16u; i = i + 1u) {
+        for (var i = 0u; i < 32u; i = i + 1u) {
             acc += a_tile[local_id.y][i] * b_tile[i][local_id.x];
         }
         workgroupBarrier();

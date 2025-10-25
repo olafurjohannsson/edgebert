@@ -1,4 +1,4 @@
-const TILE_DIM = 16u;
+const TILE_DIM = 32u;
 
 struct MatmulInfo {
     m: u32,

@@ -20,14 +20,12 @@ async fn test_layer_norm_correctness() -> Result<()> {
     let context = get_test_context().await;
     let device = &context.device;
 
-    // --- 1. Arrange: Create Identical Inputs for CPU and GPU ---
 
     let batch_size = 1;
     let seq_len = 8;
     let hidden_size = 32;
     let eps = 1e-5;
 
-    // Create random input data
     let input_cpu: Array3<f32> =
         Array::random((batch_size, seq_len, hidden_size), Uniform::new(-1.0, 1.0));
     let gamma_cpu: Array1<f32> = Array::random(hidden_size, Uniform::new(0.5, 1.5));
@@ -66,9 +64,11 @@ async fn test_layer_norm_correctness() -> Result<()> {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("Test Encoder"),
     });
+    let pipeline = compile_layer_norm_pipeline(&context);
     run_gpu_layer_norm(
         &context,
         &mut encoder,
+        &pipeline,
         &input_gpu,
         &output_gpu,
         (batch_size * seq_len) as u32,

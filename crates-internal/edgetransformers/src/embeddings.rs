@@ -14,14 +14,14 @@ pub struct EmbeddingConfig {
 pub struct Embeddings {
     pub word_embeddings: Array2<f32>,
     pub position_embeddings: Array2<f32>,
-    pub token_type_embeddings: Array2<f32>,
+    pub token_type_embeddings: Option<Array2<f32>>,
 }
 
 impl Embeddings {
     pub fn new(
         word_embeddings: Array2<f32>,
         position_embeddings: Array2<f32>,
-        token_type_embeddings: Array2<f32>,
+        token_type_embeddings: Option<Array2<f32>>,
     ) -> Self {
         Self {
             word_embeddings,
@@ -72,19 +72,22 @@ impl Embeddings {
         let pos_embeddings = self.position_embeddings.slice(s![0..seq_len, ..]);
         hidden += &pos_embeddings;
         
-        // Token type embeddings (default to type 0)
-        if let Some(type_ids) = token_type_ids {
-            for i in 0..batch_size {
-                for j in 0..seq_len {
-                    let type_id = type_ids[[i, j]] as usize;
-                    let type_emb = self.token_type_embeddings.row(type_id);
-                    let mut slice = hidden.slice_mut(s![i, j, ..]);
-                    slice += &type_emb;
+        // Token type embeddings (only if present)
+        if let Some(ref token_type_emb) = self.token_type_embeddings {
+            if let Some(type_ids) = token_type_ids {
+                for i in 0..batch_size {
+                    for j in 0..seq_len {
+                        let type_id = type_ids[[i, j]] as usize;
+                        let type_emb = token_type_emb.row(type_id);
+                        let mut slice = hidden.slice_mut(s![i, j, ..]);
+                        slice += &type_emb;
+                    }
                 }
+            } else {
+                // Default to type 0 if available
+                let type_embeddings = token_type_emb.row(0);
+                hidden += &type_embeddings;
             }
-        } else {
-            let type_embeddings = self.token_type_embeddings.row(0);
-            hidden += &type_embeddings;
         }
         
         hidden

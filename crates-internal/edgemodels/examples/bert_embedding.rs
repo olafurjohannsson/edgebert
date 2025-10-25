@@ -1,17 +1,24 @@
 use anyhow::{Result, anyhow};
-use edgemodels::bert::BertBiEncoder;
+use edgemodels::bert::BiEncoder;
+use edgemodels::roberta::RobertaBiEncoder;
+use edgemodels::roberta::RobertaConfig;
 use edgetransformers::prelude::Device;
 use edgetransformers::wgpu_context::WgpuContext;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use rand::seq::SliceRandom;
-
+//First 10 dims: [-0.0123080015, -0.050815407, -0.02291113, -0.008355495, -0.0016676121, -0.0072230296, 0.004740711, 0.01285743, -0.020140342, -0.023169108]
 use std::time::Instant;
 const USE_GPU: bool = false;
-const NUM_RUNS: usize = 5;
-const BATCH_SIZE: usize = 4;
+const NUM_RUNS: usize = 1;
+const BATCH_SIZE: usize = 32;
 
+// First 10 dims: [-0.023348324, 0.09190789, 0.024982348, 0.08469894, 0.021637155, 0.012153852, 0.054321263, -0.03697413, -0.042735234, -0.018510059]
+// Warmup complete
+
+// cpu: [-0.023348212, 0.09190799, 0.024982281, 0.08469892, 0.021637136, 0.012153861, 0.054321203, -0.036974117, -0.042735167, -0.018510068]
+// gpu: [-0.023348324, 0.09190789, 0.024982348, 0.08469894, 0.021637155, 0.012153852, 0.054321263, -0.03697413, -0.042735234, -0.018510059]
 /// ASYNC helper function to ensure model files are available, downloading them if necessary.
 /// This logic lives in the example, NOT in the main library.
 async fn ensure_model_files(repo_id: &str, local_dir: &Path) -> Result<()> {
@@ -51,7 +58,7 @@ async fn main() -> Result<()> {
 
     // --- 1. Define Model and Ensure Files are Present ---
     let model_repo = "sentence-transformers/all-MiniLM-L6-v2";
-
+//bert-base: First 10 dims: [-0.0040795375, -0.018265525, -0.018570526, 0.007197875, 0.040293448, -0.03368905, 0.024132011, 0.0022599571, 0.0032060216, -0.040955316]
     let cache_dir = dirs::cache_dir()
         .ok_or_else(|| anyhow!("Failed to get cache directory"))?
         .join("edgegpt");
@@ -72,7 +79,7 @@ async fn main() -> Result<()> {
     };
     println!("\nInitializing BertBiEncoder");
     let device = if USE_GPU { Device::Wgpu } else { Device::Cpu };
-    let bi_encoder = BertBiEncoder::from_pretrained(&model_dir, device, wgpu_context)?;
+    let bi_encoder = BiEncoder::from_pretrained(&model_dir, device, wgpu_context)?;
     println!("Model initialized successfully.");
 
     // --- 3. Prepare Input Texts ---
@@ -96,8 +103,13 @@ async fn main() -> Result<()> {
     // The first run can be slower due to cache misses, pipeline creation, etc.
     // We do one run here to warm everything up before starting the timer.
     println!("\nPerforming one warmup run...");
-    let _ = bi_encoder.encode(vec!["Warmup sentence."], true).await?;
-    println!("Warmup complete.");
+    let t = bi_encoder.encode(vec!["Warmup sentence."], true).await?;
+    for (i, embedding) in t.iter().enumerate() {
+        let norm: f32 = embedding.iter().map(|x| x*x).sum::<f32>().sqrt();
+        let n = embedding.len().min(10);
+        println!("First 10 dims: {:?}", &embedding[0..n]);
+    }
+    println!("Warmup complete");
 
     // --- 4. Benchmark Loop ---
     println!("\nStarting benchmark...");

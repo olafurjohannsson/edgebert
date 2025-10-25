@@ -15,7 +15,7 @@ pub mod traits;
 pub mod weights;
 pub mod encoder;
 pub mod prelude;
-
+pub mod bind_group;
 pub mod gpu_ops;
 pub mod wgpu_context;
 pub mod wgpu_ops;
