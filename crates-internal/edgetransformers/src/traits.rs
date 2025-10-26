@@ -219,6 +219,8 @@ pub trait EncoderArchitecture: TransformerConfig {
     /// The most common convention and vajority of models do this and tre-transpose the weights in FeedForward::new
     /// The older GPT2 architecture doesn't do this
     fn transpose_ffn_weights(&self) -> bool;
+
+     fn transpose_attention_weights(&self) -> bool;
 }
 
 /// Describes the architectural specifics of a Decoder-only model (e.g., GPT-2, Llama).

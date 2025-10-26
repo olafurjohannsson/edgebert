@@ -39,7 +39,9 @@ impl EncoderArchitecture for RobertaConfig {
     fn transpose_ffn_weights(&self) -> bool {
         false  // RoBERTa doesn't transpose (same as GPT-2 style)
     }
-
+    fn transpose_attention_weights(&self) -> bool {
+        true // BERT weights are [out, in]
+    }
     fn get_embedding_weight_names(&self) -> (&str, &str, Option<&str>) {
         (
             "embeddings.word_embeddings.weight",

@@ -4,6 +4,7 @@ use edgetransformers::prelude::Device;
 use edgetransformers::wgpu_context::WgpuContext;
 use std::path::Path;
 use tokio;
+use tokio::fs;
 use std::sync::Arc;
 
 /// Helper to ensure model files exist
@@ -24,7 +25,7 @@ async fn ensure_model_files(repo_id: &str, local_dir: &Path) -> Result<()> {
 
             let response = reqwest::get(&download_url).await?.error_for_status()?;
             let content = response.bytes().await?;
-            tokio::fs::write(&local_path, &content).await?;
+            fs::write(&local_path, &content).await?;
             println!("   ... downloaded to {:?}", local_path);
         }
     }

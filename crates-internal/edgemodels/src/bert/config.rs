@@ -47,7 +47,9 @@ impl EncoderArchitecture for BertConfig {
     fn transpose_ffn_weights(&self) -> bool {
         true
     }
-
+    fn transpose_attention_weights(&self) -> bool {
+        true // BERT weights are [out, in]
+    }
     /// Provides the names for the three embedding tables.
     fn get_embedding_weight_names(&self) -> (&str, &str, Option<&str>) {
         (
@@ -130,6 +132,9 @@ impl TransformerConfig for BertBaseConfig {
 impl EncoderArchitecture for BertBaseConfig {
     fn transpose_ffn_weights(&self) -> bool {
         true
+    }
+    fn transpose_attention_weights(&self) -> bool {
+        true // BERT weights are [out, in]
     }
 
     fn get_embedding_weight_names(&self) -> (&str, &str, Option<&str>) {
@@ -214,7 +219,9 @@ impl EncoderArchitecture for RobertaConfig {
     fn transpose_ffn_weights(&self) -> bool {
         false
     }
-
+    fn transpose_attention_weights(&self) -> bool {
+        true // BERT weights are [out, in]
+    }
     fn get_embedding_weight_names(&self) -> (&str, &str, Option<&str>) {
         (
             "embeddings.word_embeddings.weight",
