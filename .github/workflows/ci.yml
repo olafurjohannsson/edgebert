@@ -97,7 +97,7 @@ jobs:
           $CLI model download flan-t5-base
           $CLI model download distilbart-cnn
           $CLI model download qwen2.5-0.5b-instruct
-          $CLI model download qwen2.5-1.5b-instruct
+          $CLI model download qwen2.5-1.5b
 
       - uses: actions/setup-python@v5
         with:

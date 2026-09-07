@@ -634,6 +634,33 @@ enum KjarniErrorCode kjarni_chat_new(const struct KjarniChatConfig *config,
                                      struct KjarniChat **out);
 
 /**
+ * Creates a chat handle with speculative decoding enabled.
+ *
+ * A draft model proposes `draft_tokens` tokens per round and this model verifies
+ * them in a single pass. Decode is bandwidth bound, so reading the target's
+ * weights once for several tokens rather than once per token is the whole
+ * saving: measured on Qwen2.5, 0.5B drafting for 1.5B runs 3.5x faster at eight
+ * proposed tokens. The draft must share the target's vocabulary, which in
+ * practice means a smaller model of the same family.
+ *
+ * A separate entry point rather than two more fields on `KjarniChatConfig`:
+ * that struct is returned by value from `kjarni_chat_config_default` and passed
+ * back by pointer, so growing it would make every already-compiled caller hand
+ * over a shorter allocation than this library reads. Adding a function cannot
+ * break a binary that never calls it.
+ *
+ * Pass NULL for `draft_model_name` to get exactly `kjarni_chat_new`.
+ *
+ * # Safety
+ * `config` must be null or a valid `KjarniChatConfig`. `draft_model_name` must
+ * be null or a valid NUL-terminated string. `out` must be a valid pointer.
+ */
+enum KjarniErrorCode kjarni_chat_new_with_draft(const struct KjarniChatConfig *config,
+                                                const char *draft_model_name,
+                                                uintptr_t draft_tokens,
+                                                struct KjarniChat **out);
+
+/**
  * Free a Chat instance.
  */
 void kjarni_chat_free(struct KjarniChat *chat);
