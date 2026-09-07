@@ -13,7 +13,9 @@ pub use config::IndexConfig;
 pub use index_reader::{IndexReader, MetadataFilter};
 pub use index_writer::IndexWriter;
 pub use kjarni_search::{Chunk, ChunkMetadata, SearchMode, SearchResult};
-pub use loader::{DocumentLoader, LoaderConfig, TEXT_EXTENSIONS};
+pub use loader::{
+    DocumentLoader, IMAGE_EXTENSIONS, KIND_IMAGE, KIND_KEY, LoaderConfig, TEXT_EXTENSIONS,
+};
 pub use progress::{CancelToken, Progress, ProgressCallback, ProgressReporter, ProgressStage};
 pub use search_index::SearchIndex;
 pub use segment::{Segment, SegmentBuilder, SegmentMeta};

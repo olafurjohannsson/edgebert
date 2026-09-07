@@ -76,6 +76,10 @@ impl Indexer {
             include_hidden: builder.include_hidden,
             max_file_size: builder.max_file_size,
             quiet: builder.quiet,
+            // This indexer embeds text with a sentence encoder. Images need CLIP
+            // and a different embedder entirely, so they are not picked up here;
+            // `ImageIndex` in kjarni-models is the path for those.
+            include_images: false,
         };
 
         Ok(Self {

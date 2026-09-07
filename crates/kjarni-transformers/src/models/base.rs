@@ -174,6 +174,13 @@ pub struct ModelLoadConfig {
     pub max_sequence_length: Option<usize>,
     /// Use gguf
     pub use_gguf: bool,
+    /// Suppress download progress output.
+    ///
+    /// Defaults to false, so a load that has to fetch weights says so. The three
+    /// pipeline loaders used to hardcode this to quiet, which meant a first call
+    /// on an uncached model downloaded hundreds of megabytes in total silence and
+    /// looked to the caller like a hang.
+    pub quiet: bool,
 }
 
 impl ModelLoadConfig {

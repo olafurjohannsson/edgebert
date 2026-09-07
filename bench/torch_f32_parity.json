@@ -1,0 +1,42 @@
+{
+  "dtype": "float32",
+  "repetition_penalty": 1.0,
+  "prompt": "The capital of Iceland is",
+  "token_ids": [
+    7407,
+    389,
+    279,
+    12922,
+    315,
+    892,
+    3146,
+    5267,
+    785,
+    6722,
+    315,
+    38396,
+    374,
+    48212,
+    74,
+    61459
+  ],
+  "pieces": [
+    " located",
+    " on",
+    " the",
+    " island",
+    " of",
+    " which",
+    " country",
+    "?\n",
+    "The",
+    " capital",
+    " of",
+    " Iceland",
+    " is",
+    " Rey",
+    "k",
+    "jav"
+  ],
+  "text": " located on the island of which country?\nThe capital of Iceland is Reykjav"
+}

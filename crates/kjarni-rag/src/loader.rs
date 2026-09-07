@@ -16,6 +16,20 @@ pub const TEXT_EXTENSIONS: &[&str] = &[
     "clj", "hs",
 ];
 
+/// Image extensions the loader will index when `include_images` is set.
+///
+/// Deliberately narrow. These are what a photo library is actually made of, and
+/// every one is something the decoder behind the `image-io` feature can read; a
+/// longer list would only produce chunks that fail later.
+pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png"];
+
+/// Metadata key marking a chunk whose content is a file rather than its text.
+///
+/// The indexer reads this to decide which embedder to use: text chunks go through
+/// the sentence encoder, image chunks through CLIP.
+pub const KIND_KEY: &str = "kind";
+pub const KIND_IMAGE: &str = "image";
+
 #[derive(Debug, Clone)]
 pub struct LoaderConfig {
     pub splitter: SplitterConfig,
@@ -25,6 +39,8 @@ pub struct LoaderConfig {
     pub include_hidden: bool,
     pub max_file_size: Option<usize>,
     pub quiet: bool,
+    /// Walk images too, emitting one chunk per file instead of splitting text.
+    pub include_images: bool,
 }
 
 impl LoaderConfig {
@@ -39,6 +55,16 @@ impl LoaderConfig {
         for ext in exts {
             self.extensions.push(ext.to_lowercase());
         }
+        self
+    }
+
+    /// Index images as well as text.
+    ///
+    /// An image chunk holds no extracted text: its vector comes from the pixels.
+    /// What it carries instead is the filename, which is genuinely useful, since
+    /// "beach-2019.jpg" is a real signal a keyword search can match.
+    pub fn with_images(mut self) -> Self {
+        self.include_images = true;
         self
     }
 
@@ -58,6 +84,7 @@ impl Default for LoaderConfig {
             exclude_patterns: vec![],
             include_hidden: false,
             max_file_size: None,
+            include_images: false,
             quiet: false,
         }
     }
@@ -79,8 +106,42 @@ impl DocumentLoader {
         Self::new(LoaderConfig::default())
     }
 
+    /// True if this path is an image the loader was asked to include.
+    pub fn is_image(&self, path: &Path) -> bool {
+        self.config.include_images
+            && path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+                .is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str()))
+    }
+
+    /// One chunk for one image.
+    ///
+    /// Never split: an image is a single thing to retrieve, and there is no text
+    /// to chunk. The file is not opened here, so a directory scan stays cheap and
+    /// decoding failures surface at embedding time against the specific file.
+    fn load_image(&self, path: &Path) -> Result<Vec<Chunk>> {
+        let metadata = ChunkMetadata {
+            source: Some(path.display().to_string()),
+            chunk_index: Some(0),
+            total_chunks: Some(1),
+            custom: std::collections::HashMap::from([(
+                KIND_KEY.to_string(),
+                KIND_IMAGE.to_string(),
+            )]),
+            ..Default::default()
+        };
+        Ok(vec![
+            Chunk::new(filename_as_text(path)).with_metadata(metadata),
+        ])
+    }
+
     /// Load chunks from a single file
     pub fn load_file(&self, path: &Path) -> Result<Vec<Chunk>> {
+        if self.is_image(path) {
+            return self.load_image(path);
+        }
         let content = fs::read_to_string(path)?;
         if !self.config.quiet {
             eprintln!(
@@ -181,14 +242,40 @@ impl DocumentLoader {
 
         match ext {
             Some(ext) => {
+                let image = self.config.include_images && IMAGE_EXTENSIONS.contains(&ext.as_str());
                 if self.config.extensions.is_empty() {
-                    TEXT_EXTENSIONS.contains(&ext.as_str())
+                    image || TEXT_EXTENSIONS.contains(&ext.as_str())
                 } else {
-                    self.config.extensions.iter().any(|e| e == &ext)
+                    image || self.config.extensions.iter().any(|e| e == &ext)
                 }
             }
             None => false,
         }
+    }
+}
+
+/// A filename turned into something a keyword search can match.
+///
+/// `IMG_2024-08-14_beach_sunset.jpg` becomes `IMG 2024 08 14 beach sunset`. This
+/// is not a caption and is not pretending to be one: the image's meaning comes
+/// from its vector. It is there because filenames often carry the only words a
+/// photo has, and dropping them would throw away free signal.
+fn filename_as_text(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let words: Vec<&str> = stem
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.is_empty() {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        words.join(" ")
     }
 }
 
@@ -312,5 +399,80 @@ mod tests {
 
         assert!(!sources.iter().any(|s| s.contains("a.txt")));
         assert!(sources.iter().any(|s| s.contains("b.custom")));
+    }
+}
+
+#[cfg(test)]
+mod image_loading_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn touch(dir: &TempDir, name: &str, body: &[u8]) -> std::path::PathBuf {
+        let p = dir.path().join(name);
+        std::fs::write(&p, body).expect("write fixture");
+        p
+    }
+
+    #[test]
+    fn images_are_ignored_unless_asked_for() {
+        let dir = TempDir::new().unwrap();
+        touch(&dir, "photo.jpg", b"\xff\xd8not-really-a-jpeg");
+        touch(&dir, "notes.txt", b"hello world");
+
+        let chunks = DocumentLoader::with_defaults()
+            .load_directory(dir.path())
+            .expect("load");
+        assert_eq!(chunks.len(), 1, "default config must skip images");
+        assert!(chunks[0].text.contains("hello"));
+    }
+
+    #[test]
+    fn an_image_becomes_exactly_one_chunk() {
+        let dir = TempDir::new().unwrap();
+        // Body is never read: the loader records the path and leaves decoding to
+        // the embedder, so a scan does not pay to open every file.
+        touch(&dir, "beach.png", b"not a real png");
+
+        let loader = DocumentLoader::new(LoaderConfig::default().with_images());
+        let chunks = loader.load_directory(dir.path()).expect("load");
+
+        assert_eq!(chunks.len(), 1);
+        let c = &chunks[0];
+        assert_eq!(
+            c.metadata.custom.get(KIND_KEY).map(String::as_str),
+            Some(KIND_IMAGE)
+        );
+        assert!(c.metadata.source.as_ref().unwrap().ends_with("beach.png"));
+        assert_eq!(c.metadata.total_chunks, Some(1), "images are never split");
+    }
+
+    #[test]
+    fn filenames_become_searchable_words() {
+        assert_eq!(
+            filename_as_text(Path::new("/p/IMG_2024-08-14_beach_sunset.jpg")),
+            "IMG 2024 08 14 beach sunset"
+        );
+        assert_eq!(filename_as_text(Path::new("/p/holiday.png")), "holiday");
+        // A name with nothing word-like still has to yield something indexable.
+        assert_eq!(filename_as_text(Path::new("/p/___.png")), "___.png");
+    }
+
+    #[test]
+    fn text_and_images_can_be_indexed_together() {
+        let dir = TempDir::new().unwrap();
+        touch(&dir, "a.png", b"x");
+        touch(&dir, "b.jpg", b"x");
+        touch(&dir, "readme.md", b"# hello");
+        touch(&dir, "ignored.bin", b"x");
+
+        let loader = DocumentLoader::new(LoaderConfig::default().with_images());
+        let chunks = loader.load_directory(dir.path()).expect("load");
+
+        let images = chunks
+            .iter()
+            .filter(|c| c.metadata.custom.get(KIND_KEY).map(String::as_str) == Some(KIND_IMAGE))
+            .count();
+        assert_eq!(images, 2, "both images indexed");
+        assert_eq!(chunks.len() - images, 1, "markdown indexed, .bin skipped");
     }
 }

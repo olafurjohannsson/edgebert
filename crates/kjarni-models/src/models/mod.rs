@@ -17,6 +17,8 @@ pub mod t5;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod whisper;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod clip;
 pub mod cross_encoder;
 pub mod sentence_encoder;
 pub mod sequence_classifier;

@@ -65,7 +65,10 @@ pub fn validate_for_chat(model_type: ModelType) -> ChatResult<ValidationResult> 
         }
 
         // Encoders cannot generate text - hard error
-        ModelArchitecture::Bert | ModelArchitecture::NomicBert | ModelArchitecture::Mpnet => {
+        ModelArchitecture::Bert
+        | ModelArchitecture::NomicBert
+        | ModelArchitecture::Mpnet
+        | ModelArchitecture::Clip => {
             return Err(ChatError::IncompatibleModel {
                 model: cli_name.to_string(),
                 reason: format!(
@@ -115,6 +118,7 @@ pub fn validate_for_chat(model_type: ModelType) -> ChatResult<ValidationResult> 
 
         // These shouldn't happen given the architecture check above, but be explicit
         ModelTask::Embedding
+        | ModelTask::ImageEmbedding
         | ModelTask::ReRanking
         | ModelTask::Classification
         | ModelTask::SentimentAnalysis

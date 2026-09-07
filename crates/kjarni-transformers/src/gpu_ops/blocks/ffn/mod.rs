@@ -140,6 +140,7 @@ impl GpuFeedForwardStd {
             Activation::Tanh => (),
             Activation::Relu => (),
             Activation::SilU => (),
+            Activation::QuickGelu => (),
         }
 
         let (fc1_pipeline, fc1_layout) = compile_fc1_pipeline(context, activation);
@@ -355,6 +356,8 @@ fn compile_fc1_pipeline(
         Activation::Relu => 2.0,
         Activation::SilU => 3.0,
         Activation::Tanh => 4.0,
+        // Must stay in step with the COMPUTE_ACT_TYPE branches in fc1.wgsl.
+        Activation::QuickGelu => 5.0,
     };
     let constants = [("0", act_function)];
 

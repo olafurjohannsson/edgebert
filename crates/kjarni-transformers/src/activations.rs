@@ -31,6 +31,11 @@ pub enum Activation {
     SilU,
     #[serde(alias = "tanh")]
     Tanh,
+    /// `x * sigmoid(1.702x)`, the sigmoid-weighted approximation OpenAI shipped
+    /// with CLIP. Not interchangeable with the tanh form: they differ by enough
+    /// to move embeddings, so a checkpoint declaring `quick_gelu` needs this one.
+    #[serde(alias = "quick_gelu")]
+    QuickGelu,
 }
 
 impl FromStr for Activation {
@@ -43,6 +48,7 @@ impl FromStr for Activation {
             "relu" => Ok(Activation::Relu),
             "silu" | "swish" => Ok(Activation::SilU),
             "tanh" => Ok(Activation::Tanh),
+            "quick_gelu" | "quickgelu" => Ok(Activation::QuickGelu),
             _ => Err(format!("unknown activation function: {}", s)),
         }
     }
@@ -54,6 +60,10 @@ pub fn gelu_scalar(x: f32) -> f32 {
 }
 
 #[inline(always)]
+pub fn quick_gelu_scalar(x: f32) -> f32 {
+    x / (1.0 + (-1.702 * x).exp())
+}
+
 pub fn gelu_new_scalar(x: f32) -> f32 {
     let x_cubed = x * x * x;
     let inner = SQRT_2_OVER_PI * (x + GELU_COEFF * x_cubed);
@@ -98,6 +108,10 @@ fn apply_activation_slice(slice: &mut [f32], activation: Activation, use_paralle
         (Activation::SilU, false) => slice.iter_mut().for_each(|x| *x = silu_scalar(*x)),
         (Activation::Tanh, true) => slice.par_iter_mut().for_each(|x| *x = tanh_scalar(*x)),
         (Activation::Tanh, false) => slice.iter_mut().for_each(|x| *x = tanh_scalar(*x)),
+        (Activation::QuickGelu, true) => slice
+            .par_iter_mut()
+            .for_each(|x| *x = quick_gelu_scalar(*x)),
+        (Activation::QuickGelu, false) => slice.iter_mut().for_each(|x| *x = quick_gelu_scalar(*x)),
     }
 }
 
@@ -118,6 +132,8 @@ pub fn apply_activation_2d_mut(arr: &mut ArrayViewMut2<f32>, activation: Activat
             (Activation::SilU, false) => arr.mapv_inplace(silu_scalar),
             (Activation::Tanh, true) => arr.par_mapv_inplace(tanh_scalar),
             (Activation::Tanh, false) => arr.mapv_inplace(tanh_scalar),
+            (Activation::QuickGelu, true) => arr.par_mapv_inplace(quick_gelu_scalar),
+            (Activation::QuickGelu, false) => arr.mapv_inplace(quick_gelu_scalar),
         }
     }
 }
@@ -139,6 +155,8 @@ pub fn apply_activation_2d(arr: &mut Array2<f32>, activation: Activation) {
             (Activation::SilU, false) => arr.mapv_inplace(silu_scalar),
             (Activation::Tanh, true) => arr.par_mapv_inplace(tanh_scalar),
             (Activation::Tanh, false) => arr.mapv_inplace(tanh_scalar),
+            (Activation::QuickGelu, true) => arr.par_mapv_inplace(quick_gelu_scalar),
+            (Activation::QuickGelu, false) => arr.mapv_inplace(quick_gelu_scalar),
         }
     }
 }
@@ -160,6 +178,8 @@ pub fn apply_activation(arr: &mut Array3<f32>, activation: Activation) {
             (Activation::SilU, false) => arr.mapv_inplace(silu_scalar),
             (Activation::Tanh, true) => arr.par_mapv_inplace(tanh_scalar),
             (Activation::Tanh, false) => arr.mapv_inplace(tanh_scalar),
+            (Activation::QuickGelu, true) => arr.par_mapv_inplace(quick_gelu_scalar),
+            (Activation::QuickGelu, false) => arr.mapv_inplace(quick_gelu_scalar),
         }
     }
 }
@@ -551,5 +571,40 @@ mod tests {
 
         assert_relative_eq!(input.sum(), 1.0, epsilon = 1e-6);
         assert!(!input.iter().any(|x| x.is_nan()));
+    }
+}
+
+#[cfg(test)]
+mod quick_gelu_tests {
+    use super::*;
+
+    /// CLIP's QuickGELU is `x * sigmoid(1.702x)`, checked against PyTorch.
+    #[test]
+    fn quick_gelu_matches_reference() {
+        // Generated with PyTorch: `x * torch.sigmoid(1.702 * x)`.
+        let cases = [
+            (-3.0f32, -0.0180713106),
+            (-1.0, -0.1542042345),
+            (-0.5, -0.1496115625),
+            (0.0, 0.0),
+            (0.5, 0.3503884375),
+            (1.0, 0.8457957506),
+            (3.0, 2.9819288254),
+        ];
+        for (x, want) in cases {
+            let got = quick_gelu_scalar(x);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "quick_gelu({x}) = {got}, expected {want}"
+            );
+        }
+    }
+
+    /// The two GELU forms are close but not equal, which is why a checkpoint has
+    /// to declare which one it was trained with rather than getting a default.
+    #[test]
+    fn quick_gelu_is_not_gelu_new() {
+        let diff = (quick_gelu_scalar(1.0) - gelu_new_scalar(1.0)).abs();
+        assert!(diff > 1e-3, "expected the two forms to differ, got {diff}");
     }
 }

@@ -133,6 +133,7 @@ fn list(
         "Generation (Decoder)",
         "Seq2Seq",
         "Embedding",
+        "Image Embedding",
         "Re-Ranker",
         "Classifier",
     ];

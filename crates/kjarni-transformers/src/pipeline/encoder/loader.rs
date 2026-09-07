@@ -173,8 +173,10 @@ impl EncoderLoader {
         let cache_dir = cache_dir.unwrap_or_else(get_default_cache_dir);
         let model_dir = cache_dir.join(model_type.repo_id().replace('/', "_"));
 
-        // Download model files
-        download_model_files(&model_dir, &info.paths, WeightsFormat::SafeTensors, true).await?;
+        // Only silent if the caller asked for it. Downloading hundreds of
+        // megabytes with no output reads as a hang.
+        let quiet = load_config.as_ref().is_some_and(|c| c.quiet);
+        download_model_files(&model_dir, &info.paths, WeightsFormat::SafeTensors, quiet).await?;
 
         // Create GPU context if needed
         let context = if device.is_gpu() && context.is_none() {

@@ -51,6 +51,14 @@ pub enum ModelArchitecture {
 
     /// Whisper family for speech-to-text.
     Whisper,
+
+    /// CLIP family: a ViT image tower and a text tower projected into one space.
+    ///
+    /// The image tower is an ordinary transformer encoder over patches, so it runs
+    /// the same block stack as BERT does over tokens. What differs is the front:
+    /// pixels become patches through one strided projection rather than ids
+    /// through an embedding table.
+    Clip,
 }
 
 impl ModelArchitecture {
@@ -61,6 +69,7 @@ impl ModelArchitecture {
             Self::Qwen2 => "Qwen2 (Biased)",
             Self::Mistral => "Mistral (SWA)",
             Self::Phi3 => "Phi-3 (LongRoPE)",
+            Self::Clip => "CLIP (ViT + text)",
             Self::Bert => "BERT",
             Self::Mpnet => "Mpnet",
             Self::NomicBert => "Nomic-BERT",
@@ -78,7 +87,7 @@ impl ModelArchitecture {
             Self::Llama | Self::Qwen2 | Self::Mistral | Self::Phi3 | Self::GPT => "decoder",
 
             // Encoders (Embeddings/Classifiers)
-            Self::Bert | Self::NomicBert | Self::Mpnet => "encoder",
+            Self::Bert | Self::NomicBert | Self::Mpnet | Self::Clip => "encoder",
 
             // Seq2Seq
             Self::T5 | Self::Bart | Self::Whisper => "encoder-decoder",
@@ -127,6 +136,12 @@ pub enum ModelTask {
 
     /// General text-to-text transformation.
     TextToText,
+
+    /// Image -> vector, in a space shared with text embeddings.
+    ///
+    /// Distinct from `Embedding` because the input is pixels: it needs image
+    /// preprocessing rather than tokenisation, and the two cannot be swapped.
+    ImageEmbedding,
 }
 
 /// The curated list of pretrained models supported by Kjarni.
@@ -163,6 +178,9 @@ pub enum ModelType {
     WhisperLargeV3,
     DistilGpt2,
     Gpt2,
+
+    // Vision
+    ClipVitBase32,
 }
 
 /// Download URLs for all required model files.
@@ -176,8 +194,9 @@ pub struct ModelPaths {
 
     /// URL to tokenizer configuration.
     ///
-    /// Always required. Contains vocabulary and tokenization rules.
-    pub tokenizer_url: &'static str,
+    /// `None` for models that take no text at all: a vision encoder embeds pixels,
+    /// so there is no vocabulary to fetch. Every text model has one.
+    pub tokenizer_url: Option<&'static str>,
 
     /// URL to model configuration.
     ///
@@ -186,6 +205,14 @@ pub struct ModelPaths {
 
     /// Optional URL to quantized GGUF file.
     pub gguf_url: Option<&'static str>,
+
+    /// Optional URL to `preprocessor_config.json`.
+    ///
+    /// Image models need it and text models do not. It carries the resize, crop,
+    /// mean and std the weights were trained against, and getting any of them
+    /// wrong produces embeddings that look plausible while quietly ranking badly,
+    /// so these are read rather than hardcoded per model.
+    pub preprocessor_url: Option<&'static str>,
 }
 
 /// Complete metadata for a pretrained model.
@@ -256,13 +283,13 @@ impl ModelType {
 
             // Edge LLMs
             Self::Qwen2_5_0_5B_Instruct => "qwen2.5-0.5b-instruct",
-            Self::Qwen2_5_1_5B_Instruct => "qwen2.5-1.5b",
+            Self::Qwen2_5_1_5B_Instruct => "qwen2.5-1.5b-instruct",
             Self::Llama3_2_1B_Instruct => "llama3.2-1b-instruct",
             Self::Llama3_2_3B_Instruct => "llama3.2-3b-instruct",
-            Self::Phi3_5_Mini_Instruct => "phi3.5-mini",
+            Self::Phi3_5_Mini_Instruct => "phi3.5-mini-instruct",
 
             // Workhorse LLMs
-            Self::Mistral7B_v0_3_Instruct => "mistral-7b",
+            Self::Mistral7B_v0_3_Instruct => "mistral-7b-instruct",
             Self::Llama3_1_8B_Instruct => "llama3.1-8b-instruct",
             Self::DeepSeek_R1_Distill_Llama_8B => "deepseek-r1-8b",
 
@@ -277,6 +304,9 @@ impl ModelType {
             // Legacy
             Self::DistilGpt2 => "distilgpt2",
             Self::Gpt2 => "gpt2",
+
+            // Vision
+            Self::ClipVitBase32 => "clip-vit-base-32",
         }
     }
 
@@ -294,6 +324,10 @@ impl ModelType {
 
             // Vector embedding
             ModelTask::Embedding => "Embedding",
+
+            // Same index, different input: these vectors share a space with text
+            // embeddings, so they are grouped apart only by what goes in.
+            ModelTask::ImageEmbedding => "Image Embedding",
 
             //  Reranking
             ModelTask::ReRanking => "Re-Ranker",
@@ -321,9 +355,12 @@ impl ModelType {
                 task: ModelTask::Embedding,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Fastest sentence embedding model. Ideal for basic RAG.",
                 size_mb: 90,
@@ -335,9 +372,12 @@ impl ModelType {
                 task: ModelTask::ReRanking,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Cross-encoder for passage reranking. Use for search result reordering, NOT sentiment.",
                 size_mb: 90,
@@ -349,9 +389,12 @@ impl ModelType {
                 task: ModelTask::Embedding,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "High-quality sentence embedding model.",
                 size_mb: 420,
@@ -363,9 +406,12 @@ impl ModelType {
                 task: ModelTask::Embedding,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/distilbert-base-cased-distilled-squad/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/distilbert-base-cased-distilled-squad/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/distilbert-base-cased-distilled-squad/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/distilbert-base-cased-distilled-squad/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Lightweight DistilBERT for question answering.",
                 size_mb: 260,
@@ -377,9 +423,12 @@ impl ModelType {
                 task: ModelTask::Embedding,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Modern standard for RAG. 8192 context length, matryoshka embeddings.",
                 size_mb: 550,
@@ -393,9 +442,12 @@ impl ModelType {
                     // safetensors URL on their repo 404s. This mirror carries the
                     // converted weights and the same tokenizer and config.
                     weights_url: "https://huggingface.co/olafuraron/bge-m3-safetensors/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/bge-m3-safetensors/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/bge-m3-safetensors/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/bge-m3-safetensors/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Massive multilingual embedding model. State of the art for diverse languages.",
                 size_mb: 2200,
@@ -406,9 +458,12 @@ impl ModelType {
                 task: ModelTask::SentimentAnalysis,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/distilbert/distilbert-base-uncased-finetuned-sst-2-english/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/distilbert/distilbert-base-uncased-finetuned-sst-2-english/resolve/main/onnx/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/distilbert/distilbert-base-uncased-finetuned-sst-2-english/resolve/main/onnx/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/distilbert/distilbert-base-uncased-finetuned-sst-2-english/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Fast binary sentiment (positive/negative). Best for simple yes/no sentiment.",
                 size_mb: 268,
@@ -419,9 +474,12 @@ impl ModelType {
                 task: ModelTask::SentimentAnalysis,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/olafuraron/twitter-roberta-base-sentiment-latest-safetensors/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/twitter-roberta-base-sentiment-latest-safetensors/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/twitter-roberta-base-sentiment-latest-safetensors/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/twitter-roberta-base-sentiment-latest-safetensors/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "3-class sentiment (negative/neutral/positive). Optimized for social media text.",
                 size_mb: 499,
@@ -432,9 +490,12 @@ impl ModelType {
                 task: ModelTask::SentimentAnalysis,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/olafuraron/bert-base-multilingual-uncased-sentiment-safetensors/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/bert-base-multilingual-uncased-sentiment-safetensors/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/bert-base-multilingual-uncased-sentiment-safetensors/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/bert-base-multilingual-uncased-sentiment-safetensors/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "5-star sentiment (1-5). Multilingual: EN, DE, FR, ES, IT, NL.",
                 size_mb: 681,
@@ -445,9 +506,12 @@ impl ModelType {
                 task: ModelTask::Classification,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/SamLowe/roberta-base-go_emotions/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/SamLowe/roberta-base-go_emotions/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/SamLowe/roberta-base-go_emotions/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/SamLowe/roberta-base-go_emotions/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "28 emotion labels (multi-label). Detects nuanced emotions like admiration, amusement, anger, etc.",
                 size_mb: 499,
@@ -458,9 +522,12 @@ impl ModelType {
                 task: ModelTask::Classification,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/olafuraron/emotion-english-distilroberta-base-safetensors/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/emotion-english-distilroberta-base-safetensors/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/emotion-english-distilroberta-base-safetensors/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/emotion-english-distilroberta-base-safetensors/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "7 emotions: anger, disgust, fear, joy, neutral, sadness, surprise.",
                 size_mb: 329,
@@ -471,9 +538,12 @@ impl ModelType {
                 task: ModelTask::Classification,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/olafuraron/toxic-bert-safetensors/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/toxic-bert-safetensors/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/toxic-bert-safetensors/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/toxic-bert-safetensors/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Toxic comment classifier. Detects: toxic, severe_toxic, obscene, threat, insult, identity_hate.",
                 size_mb: 438,
@@ -484,11 +554,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "Tiny logic engine. Perfect for structured output and sanity checks.",
                 size_mb: 990,
@@ -499,11 +572,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "Balanced edge model. Good reasoning in a small package.",
                 size_mb: 3100,
@@ -514,11 +590,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "Official Meta edge model. Very fast, good general chat.",
                 size_mb: 2500,
@@ -529,11 +608,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct/resolve/main/model.safetensors.index.json",
-                    tokenizer_url: "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "The 3B standard. Excellent balance of speed and coherence.",
                 size_mb: 6500,
@@ -544,11 +626,14 @@ impl ModelType {
                 task: ModelTask::Reasoning,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/microsoft/Phi-3.5-mini-instruct/resolve/main/model.safetensors.index.json",
-                    tokenizer_url: "https://huggingface.co/microsoft/Phi-3.5-mini-instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/microsoft/Phi-3.5-mini-instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/microsoft/Phi-3.5-mini-instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "Microsoft's 3.8B reasoning champion. Punches way above its weight.",
                 size_mb: 7500,
@@ -559,11 +644,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/model.safetensors.index.json",
-                    tokenizer_url: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "Mistral v0.3. Extremely reliable 7B model for all tasks.",
                 size_mb: 14500,
@@ -574,11 +662,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/model.safetensors.index.json",
-                    tokenizer_url: "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "The open source standard. Robust, smart, and safe.",
                 size_mb: 16000,
@@ -589,11 +680,14 @@ impl ModelType {
                 task: ModelTask::Reasoning,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/model.safetensors.index.json",
-                    tokenizer_url: "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/unsloth/DeepSeek-R1-Distill-Llama-8B-GGUF/resolve/main/DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "State-of-the-Art reasoning distilled from DeepSeek R1.",
                 size_mb: 16000,
@@ -604,9 +698,12 @@ impl ModelType {
                 task: ModelTask::Seq2Seq,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/google/flan-t5-base/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/google/flan-t5-base/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/google/flan-t5-base/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/google/flan-t5-base/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "General purpose instruction follower (Text-to-Text).",
                 size_mb: 990,
@@ -617,9 +714,12 @@ impl ModelType {
                 task: ModelTask::Seq2Seq,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/google/flan-t5-large/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/google/flan-t5-large/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/google/flan-t5-large/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/google/flan-t5-large/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Powerful instruction follower. Great for translation and summarization.",
                 size_mb: 3000,
@@ -631,9 +731,12 @@ impl ModelType {
                 task: ModelTask::Seq2Seq,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/facebook/bart-large-cnn/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/facebook/bart-large-cnn/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/facebook/bart-large-cnn/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/facebook/bart-large-cnn/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "BART large fine-tuned for summarization.",
                 size_mb: 1600,
@@ -645,9 +748,12 @@ impl ModelType {
                 task: ModelTask::Seq2Seq,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/olafuraron/distilbart-cnn-12-6/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/distilbart-cnn-12-6/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/distilbart-cnn-12-6/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/distilbart-cnn-12-6/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Distilled BART for fast summarization.",
                 size_mb: 1000,
@@ -659,9 +765,12 @@ impl ModelType {
                 task: ModelTask::SpeechToText,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/openai/whisper-small/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/openai/whisper-small/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/openai/whisper-small/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/openai/whisper-small/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "OpenAI Whisper small for speech-to-text transcription.",
                 size_mb: 1500,
@@ -673,9 +782,12 @@ impl ModelType {
                 task: ModelTask::SpeechToText,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/openai/whisper-large-v3/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/openai/whisper-large-v3/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/openai/whisper-large-v3/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/openai/whisper-large-v3/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "OpenAI Whisper large v3 for high-accuracy speech-to-text transcription.",
                 size_mb: 7700,
@@ -687,9 +799,12 @@ impl ModelType {
                 task: ModelTask::Generation,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/distilgpt2/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/distilgpt2/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/distilgpt2/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/distilgpt2/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Distilled GPT-2 for lightweight text generation.",
                 size_mb: 319,
@@ -701,13 +816,44 @@ impl ModelType {
                 task: ModelTask::Generation,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/gpt2/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/gpt2/resolve/main/tokenizer.json",
+                    tokenizer_url: Some("https://huggingface.co/gpt2/resolve/main/tokenizer.json"),
                     config_url: "https://huggingface.co/gpt2/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "GPT-2 small: general-purpose text generator.",
                 size_mb: 548,
                 params_millions: 117,
+            },
+
+            // LAION's B/32 rather than `openai/clip-vit-base-patch32`, which ships
+            // only `pytorch_model.bin` and no safetensors at all: the loader here
+            // cannot read a pickle. Same architecture and size, trained on LAION-2B,
+            // and it uses plain GELU where OpenAI's needs QuickGELU, so it runs on
+            // the activations this engine already has.
+            //
+            // 32x32 patches over a 224px image is 49 patches plus one CLS: 50
+            // positions, so the image tower is cheaper than a short sentence
+            // through a text encoder.
+            Self::ClipVitBase32 => ModelInfo {
+                architecture: ModelArchitecture::Clip,
+                task: ModelTask::ImageEmbedding,
+                paths: ModelPaths {
+                    weights_url: "https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K/resolve/main/model.safetensors",
+                    // Present because CLIP has a text tower too: the whole point is
+                    // that a caption and a photo land in the same 512-d space.
+                    tokenizer_url: Some(
+                        "https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K/resolve/main/tokenizer.json",
+                    ),
+                    config_url: "https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K/resolve/main/config.json",
+                    gguf_url: None,
+                    preprocessor_url: Some(
+                        "https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K/resolve/main/preprocessor_config.json",
+                    ),
+                },
+                description: "CLIP ViT-B/32: images and text in one embedding space. Search photos by description.",
+                size_mb: 605,
+                params_millions: 151,
             },
         }
     }
@@ -790,6 +936,12 @@ impl ModelType {
             "distilgpt2" | "distilgpt2/resolve/main/model.safetensors" => Some(Self::DistilGpt2),
             "gpt2" | "gpt2/resolve/main/model.safetensors" => Some(Self::Gpt2),
 
+            // Former CLI names, kept resolving so existing scripts do not break.
+            // These three lacked the `-instruct` suffix their variants have.
+            "qwen2.5-1.5b" => Some(Self::Qwen2_5_1_5B_Instruct),
+            "phi3.5-mini" => Some(Self::Phi3_5_Mini_Instruct),
+            "mistral-7b" => Some(Self::Mistral7B_v0_3_Instruct),
+
             _ => None,
         }
     }
@@ -871,9 +1023,19 @@ pub async fn download_model_files(
 ) -> Result<PathBuf> {
     tokio::fs::create_dir_all(model_dir).await?;
 
-    download_file(model_dir, "tokenizer.json", paths.tokenizer_url, quiet).await?;
+    // A vision encoder has no vocabulary, so this is absent rather than empty.
+    if let Some(url) = paths.tokenizer_url {
+        download_file(model_dir, "tokenizer.json", url, quiet).await?;
+    }
     download_file(model_dir, "config.json", paths.config_url, quiet).await?;
     download_sentence_bert_config(model_dir, paths.config_url).await;
+
+    // Image models carry their resize, crop, mean and std here. Fetched eagerly
+    // because the loader cannot guess them and a wrong guess degrades retrieval
+    // silently rather than failing.
+    if let Some(url) = paths.preprocessor_url {
+        download_file(model_dir, "preprocessor_config.json", url, quiet).await?;
+    }
 
     let use_gguf = matches!(format, WeightsFormat::GGUF) && paths.gguf_url.is_some();
 
@@ -909,12 +1071,31 @@ async fn download_sentence_bert_config(model_dir: &Path, config_url: &str) {
     let Some(base) = config_url.strip_suffix("config.json") else {
         return;
     };
+
+    // `load_from_registry` calls into here on every load, not only when the model
+    // is missing, and `download_file` short-circuits on files that exist. An
+    // optional file that legitimately does not exist therefore had nothing to
+    // short-circuit on and was re-requested every time. Remembering the answer is
+    // what turns that into a one-off.
+    let marker = model_dir.join(".sentence_bert_config.absent");
+    if marker.exists() {
+        return;
+    }
+
     let url = format!("{base}sentence_bert_config.json");
 
-    // Deliberately ignoring the result: absence is expected, and a network blip
-    // here must not fail a download whose required files already succeeded.
-    if let Err(e) = download_file(model_dir, "sentence_bert_config.json", &url, true).await {
-        log::debug!("no sentence_bert_config.json for this model ({e})");
+    // Deliberately not fatal: absence is the normal case for anything that is not
+    // a sentence-transformers export, and a network blip here must not fail a
+    // download whose required files already succeeded.
+    match download_file(model_dir, "sentence_bert_config.json", &url, true).await {
+        Ok(()) => {}
+        Err(e) if is_permanent(&e) => {
+            log::debug!("no sentence_bert_config.json for this model ({e})");
+            // Only a definitive answer is recorded. A timeout or a 5xx leaves no
+            // marker, so a model that has the file still picks it up next time.
+            let _ = tokio::fs::write(&marker, b"the server returned 4xx for this file\n").await;
+        }
+        Err(e) => log::debug!("could not fetch sentence_bert_config.json ({e})"),
     }
 }
 
@@ -924,6 +1105,35 @@ async fn download_sentence_bert_config(model_dir: &Path, config_url: &str) {
     reason = "the caller is native-only; this keeps the signature honest"
 )]
 async fn download_sentence_bert_config(_model_dir: &Path, _config_url: &str) {}
+
+/// A download that failed with a status the server will keep returning.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct PermanentIfClientError {
+    filename: String,
+    status: reqwest::StatusCode,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for PermanentIfClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Failed to download {}: HTTP {}", self.filename, self.status)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::error::Error for PermanentIfClientError {}
+
+/// Whether re-sending the same request could ever give a different answer.
+///
+/// 4xx says the request itself is wrong: the file is not there, or we may not
+/// have it. 5xx and transport errors are worth retrying, which is what the
+/// backoff was written for.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_permanent(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<PermanentIfClientError>()
+        .is_some_and(|p| p.status.is_client_error())
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn download_file(model_dir: &Path, filename: &str, url: &str, quiet: bool) -> Result<()> {
@@ -947,12 +1157,24 @@ async fn download_file(model_dir: &Path, filename: &str, url: &str, quiet: bool)
     // Multi-gigabyte shards over a CDN drop mid-transfer often enough that a
     // single attempt is not a download strategy: this one died at 38% of 4.9GB.
     // Each retry resumes from what is already on disk instead of starting over.
-    let client = reqwest::Client::new();
+    // Timeouts, because the default is none: a connection that stalls rather than
+    // drops would hang here forever, and the retry loop would never run. No total
+    // timeout, since a legitimate multi-gigabyte shard can take many minutes; the
+    // read timeout is what distinguishes slow from dead.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     const MAX_ATTEMPTS: u32 = 5;
 
     for attempt in 1..=MAX_ATTEMPTS {
         match download_to_part(&client, url, filename, &part_path, quiet).await {
             Ok(()) => break,
+            // A 4xx is the server's final answer. Retrying it cannot change the
+            // outcome and costs 20 seconds of backoff to learn nothing: a missing
+            // optional file used to spend exactly that on every single load.
+            Err(e) if is_permanent(&e) => return Err(e),
             Err(e) if attempt < MAX_ATTEMPTS => {
                 if !quiet {
                     eprintln!("    {filename} interrupted ({e}); retry {attempt}/{MAX_ATTEMPTS}");
@@ -994,11 +1216,11 @@ async fn download_to_part(
 
     let response = req.send().await?;
     if !response.status().is_success() {
-        return Err(anyhow!(
-            "Failed to download {}: HTTP {}",
-            filename,
-            response.status()
-        ));
+        let status = response.status();
+        return Err(anyhow!(PermanentIfClientError {
+            filename: filename.to_string(),
+            status,
+        }));
     }
 
     // A server that ignores Range replies 200 with the whole file, so what is on

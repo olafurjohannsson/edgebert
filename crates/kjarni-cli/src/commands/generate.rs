@@ -323,6 +323,7 @@ mod tests {
             ModelArchitecture::T5,
             ModelArchitecture::Bart,
             ModelArchitecture::Whisper,
+            ModelArchitecture::Clip,
         ];
 
         for arch in all {
@@ -337,7 +338,8 @@ mod tests {
                 | ModelArchitecture::Mpnet
                 | ModelArchitecture::T5
                 | ModelArchitecture::Bart
-                | ModelArchitecture::Whisper => false,
+                | ModelArchitecture::Whisper
+                | ModelArchitecture::Clip => false,
             };
 
             assert_eq!(
