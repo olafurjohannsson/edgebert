@@ -101,6 +101,26 @@ impl DecoderGenerationBackend for AnyDecoderBackend {
         }
     }
 
+    /// Prefill continuing from a warm cache. Backends that cannot do this fall
+    /// back to a full prefill, which is correct but saves nothing.
+    async fn prefill_at(
+        &self,
+        model: &dyn DecoderLanguageModel,
+        tokens: &Array2<u32>,
+        start_pos: usize,
+        cache: &mut dyn Cache,
+    ) -> Result<Array1<f32>> {
+        match self {
+            AnyDecoderBackend::Cpu(backend) => {
+                backend.prefill_at(model, tokens, start_pos, cache).await
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            AnyDecoderBackend::Gpu(backend) => {
+                backend.prefill_at(model, tokens, start_pos, cache).await
+            }
+        }
+    }
+
     async fn decode_one(
         &self,
         model: &dyn DecoderLanguageModel,

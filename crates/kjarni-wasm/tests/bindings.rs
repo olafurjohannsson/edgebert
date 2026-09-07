@@ -500,3 +500,58 @@ fn streaming_and_batched_generation_agree() {
         "greedy decoding must not vary by call path"
     );
 }
+
+/// Prefix reuse in the browser path.
+///
+/// `WasmChat` calls `run_generation_loop` directly rather than going through
+/// `DecoderGenerator::stream`, because wasm has no blocking pool for
+/// `spawn_blocking`, so the native wiring did not reach it and this needed its own.
+/// A tab is one conversation, which is the shape the cache serves.
+///
+/// Loads its own instance rather than sharing `chat()`: enabling the cache needs
+/// `&mut`, and it would otherwise leak into every other test in this binary.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "decoder generation is orders of magnitude slower unoptimised; run with --release"
+)]
+fn chat_prefix_cache_is_off_by_default_and_does_not_change_output() {
+    let Some(bytes) = model_bytes(CHAT_KJQ) else {
+        eprintln!("skipping: {CHAT_KJQ} not present");
+        return;
+    };
+
+    // A long shared head, so the second call has something worth skipping.
+    let shared = "Reference: Paris is the capital of France. Berlin is the capital \
+                  of Germany. Rome is the capital of Italy. "
+        .repeat(8);
+    let prompt = format!("{shared}\nThe capital of Iceland is");
+
+    let plain = kjarni_wasm::WasmChat::load_core(&bytes, Some("qwen2.5-0.5b-instruct"))
+        .expect("load plain chat");
+    assert!(
+        !plain.has_prefix_cache(),
+        "prefix reuse must be off until asked for"
+    );
+    let expected = plain.generate_core(&prompt, 16, 0.0).unwrap();
+
+    let mut cached = kjarni_wasm::WasmChat::load_core(&bytes, Some("qwen2.5-0.5b-instruct"))
+        .expect("load cached chat");
+    cached.enable_prefix_cache(0).expect("enable prefix cache");
+    assert!(cached.has_prefix_cache(), "prefix reuse should be on");
+
+    let first = cached.generate_core(&prompt, 16, 0.0).unwrap();
+    assert_eq!(
+        expected, first,
+        "a cold prefix cache changed the browser path's output"
+    );
+
+    // Same head, different tail: this is the call that should reuse.
+    let second_prompt = format!("{shared}\nThe capital of Norway is");
+    let reference = plain.generate_core(&second_prompt, 16, 0.0).unwrap();
+    let warm = cached.generate_core(&second_prompt, 16, 0.0).unwrap();
+    assert_eq!(
+        reference, warm,
+        "reusing a prefix changed the browser path's answer"
+    );
+}

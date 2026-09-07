@@ -48,14 +48,31 @@ const F32_CACHE: &str = "sentence-transformers_all-MiniLM-L6-v2";
 /// route, building them from weights it already caches.
 fn fixture(rel: &str) -> Option<Vec<u8>> {
     if let Ok(dir) = std::env::var("KJARNI_KJQ_DIR") {
+        let dir = std::path::Path::new(&dir);
+        // A directory that does not exist means the variable is pointed somewhere
+        // wrong, and every fixture would silently skip. That is worth failing on.
+        assert!(
+            dir.is_dir(),
+            "KJARNI_KJQ_DIR is set to {} which is not a directory",
+            dir.display()
+        );
+
         let name = std::path::Path::new(rel).file_name().expect("fixture name");
-        let path = std::path::Path::new(&dir).join(name);
+        let path = dir.join(name);
         return match std::fs::read(&path) {
             Ok(bytes) => Some(bytes),
-            Err(e) => panic!(
-                "KJARNI_KJQ_DIR is set but {} could not be read: {e}",
-                path.display()
-            ),
+            // One fixture missing from a valid directory is normal: they are built
+            // per model, and a run that only quantised the encoder has no decoder
+            // fixture. Fall through to the caller's skip rather than failing the
+            // whole suite for a file this test alone needs.
+            Err(_) => {
+                eprintln!(
+                    "fixture {} not present in {}",
+                    name.display(),
+                    dir.display()
+                );
+                None
+            }
         };
     }
     std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).ok()

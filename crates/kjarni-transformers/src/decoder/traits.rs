@@ -38,6 +38,21 @@ pub trait DecoderGenerationBackend: Send + Sync {
         cache: &mut dyn Cache,
     ) -> Result<Array1<f32>>;
 
+    /// Prefill continuing from a cache that already holds `start_pos` tokens.
+    ///
+    /// The default re-prefills everything, so a backend that has not implemented
+    /// prefix reuse stays correct and merely gains nothing. Only pass a non-zero
+    /// `start_pos` for a cache whose contents are known to match those tokens.
+    async fn prefill_at(
+        &self,
+        model: &dyn DecoderLanguageModel,
+        tokens: &Array2<u32>,
+        _start_pos: usize,
+        cache: &mut dyn Cache,
+    ) -> Result<Array1<f32>> {
+        self.prefill(model, tokens, cache).await
+    }
+
     /// Process single token, return next logits
     async fn decode_one(
         &self,

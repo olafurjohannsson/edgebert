@@ -5,7 +5,7 @@ use futures::{StreamExt, pin_mut};
 
 use kjarni::{
     DecoderGenerator, DecoderLanguageModel, DecodingStrategy, Device, GenerationConfig,
-    ModelArchitecture, ModelType, SamplingParams, TokenType, WgpuContext,
+    ModelArchitecture, ModelType, SamplingParams, SpeculationParams, TokenType, WgpuContext,
     models::{Gpt2Model, LlamaModel, PhiModel, QwenModel},
     registry,
 };
@@ -28,6 +28,8 @@ pub async fn run(
     gpu: bool,
     no_stream: bool,
     quiet: bool,
+    draft: Option<&str>,
+    draft_tokens: usize,
 ) -> Result<()> {
     // Resolve prompt
     let prompt_text = resolve_input(prompt)?;
@@ -119,7 +121,27 @@ pub async fn run(
         ));
     };
 
-    let generator = DecoderGenerator::new(loaded_model)?;
+    let mut generator = DecoderGenerator::new(loaded_model)?;
+
+    // A draft model proposes several tokens and the target verifies them in one
+    // pass. Decode is bandwidth bound, so reading the target's weights once for
+    // k tokens instead of k times is the whole saving. The draft must share the
+    // target's vocabulary or its proposals cannot be scored.
+    let speculation = if let Some(draft_name) = draft {
+        let draft_type = ModelType::from_cli_name(draft_name)
+            .ok_or_else(|| anyhow!("{}", model_not_found_error(draft_name, Some("decoder"))))?;
+        if !quiet {
+            eprintln!("Loading draft model '{draft_name}'...");
+        }
+        let draft_model = load_decoder_from_registry(draft_type, device).await?;
+        generator.load_draft_model(draft_model)?;
+        Some(SpeculationParams {
+            num_tokens: draft_tokens,
+            probabilistic: !greedy,
+        })
+    } else {
+        None
+    };
 
     // Configure generation
     let config = build_generation_config(
@@ -130,6 +152,7 @@ pub async fn run(
         min_p,
         repetition_penalty,
         greedy,
+        speculation,
     );
 
     if !quiet {
@@ -181,6 +204,31 @@ fn is_supported_decoder_architecture(arch: ModelArchitecture) -> bool {
     arch.category() == "decoder"
 }
 
+/// Loads a decoder from the registry, dispatching on architecture.
+///
+/// The same chain the target model uses, factored out so a draft model can be
+/// loaded the same way. Registry only: a draft is named, not given as a path.
+async fn load_decoder_from_registry(
+    model_type: ModelType,
+    device: Device,
+) -> Result<Arc<dyn DecoderLanguageModel>> {
+    let m: Arc<dyn DecoderLanguageModel> = if model_type.is_llama_model() {
+        Arc::new(LlamaModel::from_registry(model_type, None, device, None, None).await?)
+    } else if model_type.is_qwen_model() {
+        Arc::new(QwenModel::from_registry(model_type, None, device, None, None).await?)
+    } else if model_type.is_phi_model() {
+        Arc::new(PhiModel::from_registry(model_type, None, device, None, None).await?)
+    } else if model_type.is_gpt2_model() {
+        Arc::new(Gpt2Model::from_registry(model_type, None, device, None, None).await?)
+    } else {
+        return Err(anyhow!(
+            "Model '{}' not yet supported for generation.",
+            model_type.cli_name()
+        ));
+    };
+    Ok(m)
+}
+
 /// Build the decoding strategy based on parameters
 fn build_decoding_strategy(
     temperature: f32,
@@ -202,6 +250,10 @@ fn build_decoding_strategy(
 }
 
 /// Build the full generation config
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors the CLI flags one to one"
+)]
 fn build_generation_config(
     max_tokens: usize,
     temperature: f32,
@@ -210,6 +262,7 @@ fn build_generation_config(
     min_p: Option<f32>,
     repetition_penalty: f32,
     greedy: bool,
+    speculation: Option<SpeculationParams>,
 ) -> GenerationConfig {
     let strategy = build_decoding_strategy(temperature, top_k, top_p, min_p, greedy);
 
@@ -217,6 +270,7 @@ fn build_generation_config(
         max_new_tokens: Some(max_tokens),
         repetition_penalty,
         strategy,
+        speculation,
         ..Default::default()
     }
 }
@@ -411,7 +465,7 @@ mod tests {
 
     #[test]
     fn test_generation_config_basic() {
-        let config = build_generation_config(100, 0.7, None, None, None, 1.1, false);
+        let config = build_generation_config(100, 0.7, None, None, None, 1.1, false, None);
 
         assert_eq!(config.max_new_tokens, Some(100));
         assert_eq!(config.repetition_penalty, 1.1);
@@ -420,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_generation_config_greedy() {
-        let config = build_generation_config(50, 0.7, None, None, None, 1.0, true);
+        let config = build_generation_config(50, 0.7, None, None, None, 1.0, true, None);
 
         assert_eq!(config.max_new_tokens, Some(50));
         assert!(matches!(config.strategy, DecodingStrategy::Greedy));
@@ -428,33 +482,33 @@ mod tests {
 
     #[test]
     fn test_generation_config_zero_temp_greedy() {
-        let config = build_generation_config(200, 0.0, None, None, None, 1.2, false);
+        let config = build_generation_config(200, 0.0, None, None, None, 1.2, false, None);
 
         assert!(matches!(config.strategy, DecodingStrategy::Greedy));
     }
 
     #[test]
     fn test_generation_config_max_tokens() {
-        let config = build_generation_config(1000, 0.7, None, None, None, 1.0, false);
+        let config = build_generation_config(1000, 0.7, None, None, None, 1.0, false, None);
         assert_eq!(config.max_new_tokens, Some(1000));
     }
 
     #[test]
     fn test_generation_config_repetition_penalty() {
-        let config = build_generation_config(100, 0.7, None, None, None, 1.5, false);
+        let config = build_generation_config(100, 0.7, None, None, None, 1.5, false, None);
         assert_eq!(config.repetition_penalty, 1.5);
     }
 
     #[test]
     fn test_generation_config_no_repetition_penalty() {
-        let config = build_generation_config(100, 0.7, None, None, None, 1.0, false);
+        let config = build_generation_config(100, 0.7, None, None, None, 1.0, false, None);
         assert_eq!(config.repetition_penalty, 1.0);
     }
 
     #[test]
     fn test_generation_config_sampling_params_passed_through() {
         let config =
-            build_generation_config(100, 0.9, Some(40), Some(0.85), Some(0.05), 1.1, false);
+            build_generation_config(100, 0.9, Some(40), Some(0.85), Some(0.05), 1.1, false, None);
 
         match config.strategy {
             DecodingStrategy::Sample(params) => {
@@ -492,37 +546,38 @@ mod tests {
 
     #[test]
     fn test_large_max_tokens() {
-        let config = build_generation_config(100_000, 0.7, None, None, None, 1.0, false);
+        let config = build_generation_config(100_000, 0.7, None, None, None, 1.0, false, None);
         assert_eq!(config.max_new_tokens, Some(100_000));
     }
 
     #[test]
     fn test_small_max_tokens() {
-        let config = build_generation_config(1, 0.7, None, None, None, 1.0, false);
+        let config = build_generation_config(1, 0.7, None, None, None, 1.0, false, None);
         assert_eq!(config.max_new_tokens, Some(1));
     }
 
     #[test]
     fn test_zero_max_tokens() {
-        let config = build_generation_config(0, 0.7, None, None, None, 1.0, false);
+        let config = build_generation_config(0, 0.7, None, None, None, 1.0, false, None);
         assert_eq!(config.max_new_tokens, Some(0));
     }
 
     #[test]
     fn test_negative_repetition_penalty() {
         // Unusual but should be accepted by the config builder
-        let config = build_generation_config(100, 0.7, None, None, None, -0.5, false);
+        let config = build_generation_config(100, 0.7, None, None, None, -0.5, false, None);
         assert_eq!(config.repetition_penalty, -0.5);
     }
 
     #[test]
     fn test_high_repetition_penalty() {
-        let config = build_generation_config(100, 0.7, None, None, None, 5.0, false);
+        let config = build_generation_config(100, 0.7, None, None, None, 5.0, false, None);
         assert_eq!(config.repetition_penalty, 5.0);
     }
     #[test]
     fn test_typical_creative_writing_params() {
-        let config = build_generation_config(512, 1.0, None, Some(0.95), Some(0.05), 1.1, false);
+        let config =
+            build_generation_config(512, 1.0, None, Some(0.95), Some(0.05), 1.1, false, None);
 
         match config.strategy {
             DecodingStrategy::Sample(params) => {
@@ -537,7 +592,7 @@ mod tests {
     #[test]
     fn test_typical_code_generation_params() {
         // Lower temperature, stricter sampling
-        let config = build_generation_config(256, 0.3, Some(40), Some(0.9), None, 1.0, false);
+        let config = build_generation_config(256, 0.3, Some(40), Some(0.9), None, 1.0, false, None);
 
         match config.strategy {
             DecodingStrategy::Sample(params) => {
@@ -551,14 +606,15 @@ mod tests {
     #[test]
     fn test_deterministic_generation_params() {
         // Greedy for reproducibility
-        let config = build_generation_config(100, 0.0, None, None, None, 1.0, false);
+        let config = build_generation_config(100, 0.0, None, None, None, 1.0, false, None);
         assert!(matches!(config.strategy, DecodingStrategy::Greedy));
     }
 
     #[test]
     fn test_chatbot_params() {
         // Balanced settings
-        let config = build_generation_config(512, 0.7, Some(50), Some(0.9), Some(0.1), 1.1, false);
+        let config =
+            build_generation_config(512, 0.7, Some(50), Some(0.9), Some(0.1), 1.1, false, None);
 
         assert_eq!(config.max_new_tokens, Some(512));
         assert_eq!(config.repetition_penalty, 1.1);

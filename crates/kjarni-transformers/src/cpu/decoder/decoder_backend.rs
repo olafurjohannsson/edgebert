@@ -73,6 +73,36 @@ impl DecoderGenerationBackend for CpuDecoderBackend {
         Ok(logits)
     }
 
+    /// Prefill continuing from a warm cache. `start_pos` tokens are already in it.
+    async fn prefill_at(
+        &self,
+        model: &dyn DecoderLanguageModel,
+        tokens: &Array2<u32>,
+        start_pos: usize,
+        cache: &mut dyn Cache,
+    ) -> Result<Array1<f32>> {
+        if start_pos == 0 {
+            return self.prefill(model, tokens, cache).await;
+        }
+        if tokens.is_empty() {
+            return Err(anyhow!("Cannot prefill with empty prompt"));
+        }
+        let ops = model
+            .decoder_cpu_ops()
+            .ok_or_else(|| anyhow!("Model does not support CPU execution"))?;
+
+        match model.autoregressive_loop() {
+            AutoregressiveLoop::Pipelined => {
+                self.prefill_pipelined_from(ops, tokens, start_pos, cache)
+            }
+            // The legacy loop has different cache semantics and no offset path;
+            // reusing a prefix there would silently mis-position the new tokens.
+            AutoregressiveLoop::Legacy => Err(anyhow!(
+                "prefix reuse is not supported for the legacy autoregressive loop"
+            )),
+        }
+    }
+
     /// Processes a single token and returns logits for the next token.
     async fn decode_one(
         &self,
@@ -148,6 +178,32 @@ impl CpuDecoderBackend {
         let logits_3d = ops.project_to_logits(&decoder_output)?;
 
         // Extract last position: [1, seq, vocab] -> [vocab]
+        Ok(logits_3d.slice(s![0, -1, ..]).to_owned())
+    }
+
+    /// Pipelined prefill that continues from a warm cache.
+    ///
+    /// `start_pos` is how many tokens the cache already holds. The attention
+    /// already handles a non-zero position offset — `start_write` is derived from
+    /// the cache length — so this is the same code path with the offset threaded
+    /// through rather than hardcoded to zero. Verified against a whole-prompt
+    /// prefill: identical logits, same argmax.
+    fn prefill_pipelined_from(
+        &self,
+        ops: &dyn CpuDecoderOps,
+        tokens: &Array2<u32>,
+        start_pos: usize,
+        cache: &mut dyn Cache,
+    ) -> Result<Array1<f32>> {
+        let new_len = tokens.shape()[1];
+        let attention_mask = ops.get_attention_mask(new_len, start_pos)?;
+        let hidden_states = ops.embed(tokens, start_pos)?;
+
+        let decoder_output =
+            ops.decoder()
+                .forward(&hidden_states, &attention_mask, start_pos, Some(cache))?;
+
+        let logits_3d = ops.project_to_logits(&decoder_output)?;
         Ok(logits_3d.slice(s![0, -1, ..]).to_owned())
     }
 

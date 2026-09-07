@@ -179,8 +179,38 @@ pub unsafe extern "C" fn kjarni_chat_new(
     config: *const KjarniChatConfig,
     out: *mut *mut KjarniChat,
 ) -> KjarniErrorCode {
+    unsafe { kjarni_chat_new_with_draft(config, std::ptr::null(), 0, out) }
+}
+
+/// Creates a chat handle with speculative decoding enabled.
+///
+/// A draft model proposes `draft_tokens` tokens per round and this model verifies
+/// them in a single pass. Decode is bandwidth bound, so reading the target's
+/// weights once for several tokens rather than once per token is the whole
+/// saving: measured on Qwen2.5, 0.5B drafting for 1.5B runs 3.5x faster at eight
+/// proposed tokens. The draft must share the target's vocabulary, which in
+/// practice means a smaller model of the same family.
+///
+/// A separate entry point rather than two more fields on `KjarniChatConfig`:
+/// that struct is returned by value from `kjarni_chat_config_default` and passed
+/// back by pointer, so growing it would make every already-compiled caller hand
+/// over a shorter allocation than this library reads. Adding a function cannot
+/// break a binary that never calls it.
+///
+/// Pass NULL for `draft_model_name` to get exactly `kjarni_chat_new`.
+///
+/// # Safety
+/// `config` must be null or a valid `KjarniChatConfig`. `draft_model_name` must
+/// be null or a valid NUL-terminated string. `out` must be a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kjarni_chat_new_with_draft(
+    config: *const KjarniChatConfig,
+    draft_model_name: *const c_char,
+    draft_tokens: usize,
+    out: *mut *mut KjarniChat,
+) -> KjarniErrorCode {
     crate::panic::guard(
-        "kjarni_chat_new",
+        "kjarni_chat_new_with_draft",
         KjarniErrorCode::Panic,
         || -> KjarniErrorCode {
             unsafe {
@@ -206,8 +236,22 @@ pub unsafe extern "C" fn kjarni_chat_new(
                     Err(_) => return KjarniErrorCode::InvalidUtf8,
                 };
 
+                let draft_name = if draft_model_name.is_null() {
+                    None
+                } else {
+                    match CStr::from_ptr(draft_model_name).to_str() {
+                        Ok(s) => Some(s),
+                        Err(_) => return KjarniErrorCode::InvalidUtf8,
+                    }
+                };
+
                 let result = get_runtime().block_on(async {
                     let mut builder = Chat::builder(model_name);
+
+                    if let Some(d) = draft_name {
+                        builder =
+                            builder.draft(d, if draft_tokens == 0 { 4 } else { draft_tokens });
+                    }
 
                     // Device
                     match config.device {

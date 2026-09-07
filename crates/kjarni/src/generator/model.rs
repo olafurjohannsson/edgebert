@@ -116,19 +116,65 @@ impl Generator {
                     source: e,
                 })?;
 
-        let decoder = Arc::new(DecoderGenerator::new(model.clone()).map_err(|e| {
-            GeneratorError::LoadFailed {
+        let mut decoder_inner =
+            DecoderGenerator::new(model.clone()).map_err(|e| GeneratorError::LoadFailed {
                 model: builder.model.clone(),
                 source: e,
-            }
-        })?);
+            })?;
+
+        // The draft is loaded before the generator is shared, because attaching
+        // one needs &mut. It must share the target's vocabulary; a mismatch is
+        // reported here rather than producing proposals that can never be scored.
+        let speculation = if let Some(ref draft_name) = builder.draft_model {
+            let draft_type = ModelType::from_cli_name(draft_name)
+                .ok_or_else(|| GeneratorError::UnknownModel(draft_name.clone()))?;
+            let draft_model = Self::load_model(
+                draft_type,
+                &cache_dir,
+                device,
+                context.clone(),
+                Default::default(),
+            )
+            .await
+            .map_err(|e| GeneratorError::LoadFailed {
+                model: draft_name.clone(),
+                source: e,
+            })?;
+            decoder_inner.load_draft_model(draft_model).map_err(|e| {
+                GeneratorError::LoadFailed {
+                    model: draft_name.clone(),
+                    source: e,
+                }
+            })?;
+            Some(kjarni_transformers::common::SpeculationParams {
+                num_tokens: builder.draft_tokens,
+                probabilistic: true,
+            })
+        } else {
+            None
+        };
+
+        // Capacity caps the prefix that can be reused, and the KV cache behind it
+        // is allocated eagerly, so this is a memory decision the caller makes
+        // rather than the model's full context window.
+        if let Some(tokens) = builder.prefix_cache_tokens {
+            decoder_inner
+                .enable_prefix_cache(tokens)
+                .map_err(|e| GeneratorError::LoadFailed {
+                    model: builder.model.clone(),
+                    source: e,
+                })?;
+        }
+
+        let decoder = Arc::new(decoder_inner);
 
         let model_defaults = model.get_default_generation_config();
-        let generation_config = resolve_generation_config(
+        let mut generation_config = resolve_generation_config(
             model_defaults,
             &builder.generation_overrides,
             &GenerationOverrides::default(),
         );
+        generation_config.inner.speculation = speculation;
 
         Ok(Self {
             decoder,

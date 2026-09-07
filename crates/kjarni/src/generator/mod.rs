@@ -6,7 +6,7 @@ pub mod presets;
 mod types;
 mod validation;
 
-pub use builder::GeneratorBuilder;
+pub use builder::{DEFAULT_PREFIX_CACHE_TOKENS, GeneratorBuilder};
 use kjarni_transformers::ModelType;
 pub use model::Generator;
 pub use types::*;

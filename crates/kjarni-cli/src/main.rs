@@ -38,6 +38,8 @@ async fn main() -> Result<()> {
             gpu,
             no_stream,
             quiet,
+            draft,
+            draft_tokens,
         } => {
             commands::generate::run(
                 prompt.as_deref(),
@@ -53,6 +55,8 @@ async fn main() -> Result<()> {
                 gpu,
                 no_stream,
                 quiet,
+                draft.as_deref(),
+                draft_tokens,
             )
             .await
         }
@@ -235,6 +239,8 @@ async fn main() -> Result<()> {
             max_tokens,
             gpu,
             quiet,
+            draft,
+            draft_tokens,
         } => {
             commands::chat::run(
                 &model,
@@ -244,6 +250,8 @@ async fn main() -> Result<()> {
                 max_tokens,
                 gpu,
                 quiet,
+                draft.as_deref(),
+                draft_tokens,
             )
             .await
         }
