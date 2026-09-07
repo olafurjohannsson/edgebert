@@ -105,7 +105,8 @@ impl DecoderAttention {
 
         // Prefill without a padding mask is the case where materialising
         // [batch, heads, seq, seq] is both unnecessary and expensive: at 4096
-        // tokens that tensor is 939 MB and crosses the bus four times per layer.
+        // tokens that tensor can be large and crosses the bus four times per layer.
+        //
         // The streaming path computes the same thing a block at a time. It is
         // gated on there being no external mask because it only knows how to
         // apply causality, and on seq_len being large enough for the block
@@ -135,7 +136,12 @@ impl DecoderAttention {
 
         // Decode reads the whole KV cache for one query row, so how it walks that
         // cache is the entire cost. See the note on `decode_attention`.
-        if is_decode && !streaming_disabled() {
+        //
+        // `mask_is_noop` gates this for the same reason it gates prefill above:
+        // `decode_attention` attends over the whole cache and takes no mask, so a
+        // caller that passes one to hide padded positions would have it silently
+        // ignored. That is what broke `test_decoder_attention_masking`.
+        if is_decode && mask_is_noop && !streaming_disabled() {
             let context = super::streaming_attention::decode_attention(
                 &q_heads,
                 &k_cache.view(),
