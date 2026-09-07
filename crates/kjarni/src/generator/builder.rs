@@ -12,6 +12,14 @@ use crate::generator::presets::GeneratorPreset;
 use super::model::Generator;
 use super::types::GeneratorResult;
 
+/// Tokens a prefix cache holds unless the caller picks a size.
+///
+/// Sized against memory rather than the model's context window: KV is eagerly
+/// allocated f32, roughly 24KB per token on Qwen2.5-0.5B, so this is about 96MB
+/// there while that model's full 32768-token context would be 768MB. Long enough
+/// to cover a real conversation or a RAG passage set.
+pub const DEFAULT_PREFIX_CACHE_TOKENS: usize = 4096;
+
 /// Builder for configuring a Generator.
 ///
 /// # Example
@@ -38,6 +46,16 @@ pub struct GeneratorBuilder {
     pub(crate) download_policy: DownloadPolicy,
     pub(crate) load_config: Option<LoadConfig>,
 
+    // Speculative decoding: a small model proposes tokens, this one verifies a
+    // batch of them in a single pass. Decode is bandwidth bound, so reading the
+    // target's weights once for k tokens instead of k times is the saving.
+    pub(crate) draft_model: Option<String>,
+    pub(crate) draft_tokens: usize,
+
+    // Prefix reuse: keep one KV cache alive across calls so a prompt that shares
+    // a head with the last one prefills only the new tail. `None` is off.
+    pub(crate) prefix_cache_tokens: Option<usize>,
+
     // Generation defaults
     pub(crate) generation_overrides: GenerationOverrides,
 
@@ -57,6 +75,9 @@ impl GeneratorBuilder {
             cache_dir: None,
             download_policy: DownloadPolicy::default(),
             load_config: None,
+            draft_model: None,
+            draft_tokens: 4,
+            prefix_cache_tokens: None,
             generation_overrides: GenerationOverrides::default(),
             quiet: false,
             allow_warnings: false,
@@ -116,6 +137,51 @@ impl GeneratorBuilder {
     pub fn precise(mut self) -> Self {
         self.generation_overrides.temperature = Some(0.2);
         self.generation_overrides.top_p = Some(0.9);
+        self
+    }
+
+    /// Enables speculative decoding with `name` as the draft model.
+    ///
+    /// The draft must share this model's vocabulary, which in practice means a
+    /// smaller model of the same family: qwen2.5-0.5b drafting for qwen2.5-1.5b.
+    /// `num_tokens` is how many the draft proposes per round; more trades wasted
+    /// draft work against fewer passes over the target's weights.
+    pub fn draft(mut self, name: impl Into<String>, num_tokens: usize) -> Self {
+        self.draft_model = Some(name.into());
+        self.draft_tokens = num_tokens.max(1);
+        self
+    }
+
+    /// Reuses the KV cache across calls, prefilling only what a new prompt does
+    /// not already share with the last one.
+    ///
+    /// Pays off whenever successive prompts share a long head: a chat replaying
+    /// its history, or RAG re-sending the same retrieved passages. On
+    /// Qwen2.5-0.5B a 2048 token prompt costs 15.96s cold and 0.49s with 1984 of
+    /// those tokens already cached, for identical logits.
+    ///
+    /// Holds [`DEFAULT_PREFIX_CACHE_TOKENS`] tokens; use
+    /// [`prefix_cache_tokens`](Self::prefix_cache_tokens) to choose. Prompts
+    /// longer than that still work, they simply prefill from scratch.
+    ///
+    /// Off by default, for two reasons. The cache is eagerly allocated f32 KV, so
+    /// it costs real memory: on Qwen2.5-0.5B, 24 layers of 2 KV heads, roughly
+    /// 24KB per token, which is 96MB at the default and 768MB if sized to that
+    /// model's full 32768-token context. And one cache holds one conversation, so
+    /// generations on a single instance serialise instead of running concurrently.
+    /// Ignored while speculative decoding is active.
+    pub fn prefix_cache(mut self, enabled: bool) -> Self {
+        self.prefix_cache_tokens = enabled.then_some(DEFAULT_PREFIX_CACHE_TOKENS);
+        self
+    }
+
+    /// Enables prefix reuse with an explicit capacity in tokens.
+    ///
+    /// Capacity is the longest shared prefix that can be reused, and it is what
+    /// the memory cost scales with: roughly 24KB per token on Qwen2.5-0.5B, more
+    /// on models with more layers or KV heads. Clamped to the model's context.
+    pub fn prefix_cache_tokens(mut self, tokens: usize) -> Self {
+        self.prefix_cache_tokens = Some(tokens.max(1));
         self
     }
 

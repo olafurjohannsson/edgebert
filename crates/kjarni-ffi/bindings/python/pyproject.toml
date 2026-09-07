@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kjarni"
-version = "0.1.10"
+version = "0.2.0"
 description = "Kjarni - Cross-platform ML inference engine. Embeddings, classification, reranking, and RAG search."
 authors = [{name = "Ólafur Aron Jóhannsson"}]
 license = {text = "MIT or Apache-2.0"}

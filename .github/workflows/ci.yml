@@ -63,7 +63,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # One key per job, deliberately. These three jobs download different model
-      # sets (13 here, 9 for csharp-test, 3 for cpp-test) and run concurrently.
+      # sets (14 here, 9 for csharp-test, 3 for cpp-test) and run concurrently.
       # `actions/cache` keys are immutable and a job only saves when it missed, so
       # a single shared key is won permanently by whichever job saves first --
       # usually cpp-test, which downloads the least. Every later run would then
@@ -74,7 +74,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/kjarni
-          key: kjarni-models-test-v3
+          key: kjarni-models-test-v4
 
       # Built under the same profile as the tests below so the two share
       # artifacts instead of compiling the dependency graph twice.
@@ -97,6 +97,7 @@ jobs:
           $CLI model download flan-t5-base
           $CLI model download distilbart-cnn
           $CLI model download qwen2.5-0.5b-instruct
+          $CLI model download qwen2.5-1.5b-instruct
 
       - uses: actions/setup-python@v5
         with:

@@ -2,7 +2,7 @@ use crate::{
     Cache,
     common::{
         CancellationToken, GenerationConfig, SpeculationParams, StreamedToken, TokenType,
-        sample_token,
+        apply_no_repeat_ngram, apply_repetition_penalty_mut, sample_token,
     },
     cpu::decoder::CpuDecoderBackend,
     decoder::{
@@ -149,8 +149,14 @@ pub async fn run_speculative_generation_loop(
             reason = "seq_len is also advanced inside the body, so it is not a plain loop counter"
         )]
         for _ in 0..num_speculative {
-            let probs = softmax(&current_logits);
-            let token = sample_token(current_logits, &crate::common::DecodingStrategy::Greedy)?;
+            // The plain loop penalises repetition before sampling; without the
+            // same treatment here the draft proposes tokens the target would
+            // never pick, every one is rejected, and the output drifts toward
+            // exactly the repetition the penalty exists to stop.
+            let mut draft_logits_step = current_logits.clone();
+            apply_penalties(&mut draft_logits_step, &all_tokens, &config);
+            let probs = softmax(&draft_logits_step);
+            let token = sample_token(draft_logits_step, &crate::common::DecodingStrategy::Greedy)?;
 
             draft_tokens.push(token);
             draft_probs.push(probs);
@@ -181,12 +187,44 @@ pub async fn run_speculative_generation_loop(
             draft_tokens
         );
 
+        // What verifies a draft token is the target's prediction from the state
+        // *before* that token. Feeding only the draft tokens gives logits shifted
+        // by one — row i is the prediction after d_i, not the one that produced
+        // it — and the accept loop then compares every token against the wrong
+        // distribution. The output degenerates into repetition rather than
+        // failing outright, which is why this survived without a test.
+        //
+        // Prepending the last accepted token restores the alignment: row i is the
+        // prediction that should have produced d_i, and the final row is the bonus
+        // token that comes free when every draft token is accepted.
+        let last_accepted = *all_tokens
+            .last()
+            .ok_or_else(|| anyhow!("speculation with an empty context"))?;
+        let mut verify_input = Vec::with_capacity(draft_tokens.len() + 1);
+        verify_input.push(last_accepted);
+        verify_input.extend_from_slice(&draft_tokens);
+
+        // Re-scoring that last token means rewinding one position, or it would be
+        // written into the cache twice.
+        let verify_offset = all_tokens.len() - 1;
+        target_cache.set_seq_length(verify_offset);
+
         let verify_logits = verify_batch(
             target.as_ref(),
-            &draft_tokens,
-            all_tokens.len(),
+            &verify_input,
+            verify_offset,
             target_cache.as_mut(),
         )?;
+
+        // Same penalties on the verifying side, or the target scores each draft
+        // token against a different distribution than plain decoding would use
+        // and the two paths disagree for the same prompt.
+        let mut verify_logits = verify_logits;
+        for i in 0..verify_logits.shape()[0] {
+            let mut row = verify_logits.slice(s![i, ..]).to_owned();
+            apply_penalties(&mut row, &all_tokens, &config);
+            verify_logits.slice_mut(s![i, ..]).assign(&row);
+        }
 
         let (accepted_tokens, _final_logits) = if probabilistic {
             accept_probabilistic(&draft_tokens, &draft_probs, &verify_logits)
@@ -205,6 +243,14 @@ pub async fn run_speculative_generation_loop(
         );
 
         for &token in &accepted_tokens {
+            // Before emitting, not after. The plain loop stops on a stop token
+            // without sending it; sending first put `<|im_end|>` on the end of
+            // every speculative reply.
+            if stop_tokens.contains(&token) {
+                all_tokens.push(token);
+                break 'outer;
+            }
+
             all_tokens.push(token);
             stats.record_token();
 
@@ -221,10 +267,6 @@ pub async fn run_speculative_generation_loop(
                 .await
                 .is_err()
             {
-                break 'outer;
-            }
-
-            if stop_tokens.contains(&token) {
                 break 'outer;
             }
         }
@@ -372,6 +414,19 @@ fn sample_from_distribution(probs: &Array1<f32>) -> u32 {
     }
 
     (probs.len() - 1) as u32
+}
+
+/// Applies the same logit penalties the plain decoding loop applies.
+///
+/// Speculative decoding must produce what plain decoding would; anything applied
+/// on one side and not the other makes `--draft` quietly change the output.
+fn apply_penalties(logits: &mut Array1<f32>, history: &[u32], config: &GenerationConfig) {
+    if config.repetition_penalty != 1.0 {
+        apply_repetition_penalty_mut(logits, history, config.repetition_penalty);
+    }
+    if config.no_repeat_ngram_size > 0 {
+        apply_no_repeat_ngram(logits, history, config.no_repeat_ngram_size);
+    }
 }
 
 #[cfg(test)]

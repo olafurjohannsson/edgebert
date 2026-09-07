@@ -37,10 +37,12 @@ pub use kjarni_transformers::traits::Device;
 // Weight loaders, so `kjarni inspect` can read a file's own description of itself
 // without the CLI depending on kjarni-transformers directly.
 #[cfg(not(target_arch = "wasm32"))]
+pub use kjarni_transformers::cache::PrefixCache;
 pub use kjarni_transformers::weights::{GgufLoader, SafeTensorsLoader, WeightLoader};
 // Re-export generation
 pub use kjarni_transformers::common::{
-    BeamSearchParams, DecodingStrategy, GenerationConfig, SamplingParams, StreamedToken, TokenType,
+    BeamSearchParams, DecodingStrategy, GenerationConfig, SamplingParams, SpeculationParams,
+    StreamedToken, TokenType,
 };
 
 // Re-export chat

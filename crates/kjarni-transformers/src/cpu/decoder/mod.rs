@@ -4,6 +4,7 @@ mod decoder_layer;
 mod gqa_projection;
 mod rope_decoder_layer;
 mod speculation;
+pub mod streaming_attention;
 pub use crate::cpu::decoder::{
     decoder_attention::DecoderAttention,
     decoder_backend::CpuDecoderBackend,

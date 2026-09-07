@@ -103,6 +103,59 @@ impl DecoderAttention {
 
         let n_rep = self.num_heads / self.num_kv_heads;
 
+        // Prefill without a padding mask is the case where materialising
+        // [batch, heads, seq, seq] is both unnecessary and expensive: at 4096
+        // tokens that tensor is 939 MB and crosses the bus four times per layer.
+        // The streaming path computes the same thing a block at a time. It is
+        // gated on there being no external mask because it only knows how to
+        // apply causality, and on seq_len being large enough for the block
+        // machinery to pay for itself.
+        let mask_is_noop = attention_mask.is_none_or(|m| m.iter().all(|&x| x == 1.0));
+        if !is_decode && seq_len >= 128 && mask_is_noop && !streaming_disabled() {
+            let context = super::streaming_attention::streaming_causal_attention(
+                &q_heads,
+                &k_cache.view(),
+                &v_cache.view(),
+                self.num_kv_heads,
+                self.scale_factor,
+                start_write,
+            );
+            let context_flat = context
+                .permuted_axes([0, 2, 1, 3])
+                .as_standard_layout()
+                .into_shape_with_order((batch * seq_len, self.num_heads * self.head_dim))?
+                .to_owned();
+            let output = self.o_proj.matmul(&context_flat.view());
+            return Ok(output.into_shape_with_order((
+                batch,
+                seq_len,
+                self.num_heads * self.head_dim,
+            ))?);
+        }
+
+        // Decode reads the whole KV cache for one query row, so how it walks that
+        // cache is the entire cost. See the note on `decode_attention`.
+        if is_decode && !streaming_disabled() {
+            let context = super::streaming_attention::decode_attention(
+                &q_heads,
+                &k_cache.view(),
+                &v_cache.view(),
+                self.num_kv_heads,
+                self.scale_factor,
+            );
+            let context_flat = context
+                .permuted_axes([0, 2, 1, 3])
+                .as_standard_layout()
+                .into_shape_with_order((batch * seq_len, self.num_heads * self.head_dim))?
+                .to_owned();
+            let output = self.o_proj.matmul(&context_flat.view());
+            return Ok(output.into_shape_with_order((
+                batch,
+                seq_len,
+                self.num_heads * self.head_dim,
+            ))?);
+        }
+
         let mut scores = if is_decode {
             let k_view = k_cache
                 .view()
@@ -184,6 +237,21 @@ impl DecoderAttention {
             }
         }
     }
+}
+
+/// Escape hatch for the streaming path.
+///
+/// Set `KJARNI_NO_STREAMING_ATTN=1` to force the materialising path. Kept so the
+/// two can be compared against each other in one build, and so a bug here can be
+/// ruled out without a rebuild.
+fn streaming_disabled() -> bool {
+    use std::sync::OnceLock;
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| {
+        std::env::var("KJARNI_NO_STREAMING_ATTN")
+            .map(|v| v != "0")
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(test)]

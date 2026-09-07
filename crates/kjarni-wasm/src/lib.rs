@@ -667,6 +667,13 @@ impl WasmClassifier {
 /// The cost is that a call blocks until the whole response is ready, which for a few
 /// hundred tokens is seconds, not milliseconds. Run it in a Web Worker; on the main
 /// thread it will freeze the tab.
+/// Tokens a browser prefix cache holds unless the caller picks a size.
+///
+/// Half the native default. KV is eagerly allocated f32, roughly 24KB per token on
+/// Qwen2.5-0.5B, so this is about 48MB, and wasm32 has a hard address-space ceiling
+/// that a model's weights are already eating into.
+pub const DEFAULT_WASM_PREFIX_CACHE_TOKENS: usize = 2048;
+
 #[wasm_bindgen]
 pub struct WasmChat {
     generator: DecoderGenerator,
@@ -685,6 +692,35 @@ impl WasmChat {
     pub fn load(data: &[u8], model_id: Option<String>) -> Result<WasmChat, JsValue> {
         WasmChat::load_core(data, model_id.as_deref())
             .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Reuse the KV cache across turns, so a conversation prefills only its newest
+    /// message instead of replaying the whole transcript.
+    ///
+    /// Measured natively on Qwen2.5-0.5B with a long system prompt: turn one is
+    /// unchanged, turns two and three go from about 2.2s to roughly 0.2s, for
+    /// identical answers. A browser tab is one conversation, so there is no sharing
+    /// hazard here.
+    ///
+    /// `tokens` is the longest transcript that can be reused, and what the memory
+    /// cost scales with; pass 0 for [`DEFAULT_WASM_PREFIX_CACHE_TOKENS`]. Longer
+    /// conversations keep working, they simply stop reusing once they outgrow it.
+    #[wasm_bindgen(js_name = enablePrefixCache)]
+    pub fn enable_prefix_cache(&mut self, tokens: usize) -> Result<(), JsValue> {
+        let tokens = if tokens == 0 {
+            DEFAULT_WASM_PREFIX_CACHE_TOKENS
+        } else {
+            tokens
+        };
+        self.generator
+            .enable_prefix_cache(tokens)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Whether prefix reuse is on.
+    #[wasm_bindgen(js_name = hasPrefixCache)]
+    pub fn has_prefix_cache(&self) -> bool {
+        self.generator.has_prefix_cache()
     }
 
     /// Generate a completion for `prompt`.
@@ -914,7 +950,9 @@ impl WasmChat {
         use kjarni_transformers::common::{
             DecodingStrategy, GenerationConfig, SamplingParams, TokenType,
         };
-        use kjarni_transformers::decoder::generator::run_generation_loop;
+        use kjarni_transformers::decoder::generator::{
+            run_generation_loop, run_generation_loop_with_cache,
+        };
 
         let config = GenerationConfig {
             max_new_tokens: Some(max_new_tokens),
@@ -934,14 +972,30 @@ impl WasmChat {
         let tokens = self.generator.encode(prompt, &config)?;
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
 
-        let generate = run_generation_loop(
-            self.generator.model.clone(),
-            self.generator.backend(),
-            tokens,
-            config,
-            tx,
-            None,
-        );
+        // A browser conversation re-sends its whole transcript every turn, so with
+        // the cache on only the new turn is prefilled. One tab is one conversation,
+        // which is exactly the shape this cache serves.
+        let prefix = self.generator.prefix_cache_handle();
+        let model = self.generator.model.clone();
+        let backend = self.generator.backend();
+        let generate = async {
+            match prefix {
+                Some(pc) => {
+                    let mut guard = pc.lock().await;
+                    run_generation_loop_with_cache(
+                        model,
+                        backend,
+                        tokens,
+                        config,
+                        tx,
+                        None,
+                        Some(&mut guard),
+                    )
+                    .await
+                }
+                None => run_generation_loop(model, backend, tokens, config, tx, None).await,
+            }
+        };
 
         let drain = async {
             let mut out = String::new();

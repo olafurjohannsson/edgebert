@@ -1,6 +1,8 @@
 # Kjarni
 
 [![NuGet](https://img.shields.io/nuget/v/Kjarni?logo=nuget&label=NuGet)](https://www.nuget.org/packages/Kjarni)
+[![PyPI](https://img.shields.io/pypi/v/kjarni?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/kjarni/)
+[![Crates.io](https://img.shields.io/crates/v/kjarni?logo=rust&label=crates.io)](https://crates.io/crates/kjarni)
 [![Go Reference](https://pkg.go.dev/badge/github.com/olafurjohannsson/kjarni-go.svg)](https://pkg.go.dev/github.com/olafurjohannsson/kjarni-go)
 [![CI](https://github.com/olafurjohannsson/kjarni/actions/workflows/ci.yml/badge.svg)](https://github.com/olafurjohannsson/kjarni/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
@@ -74,16 +76,21 @@ curl -fsSL https://kjarni.ai/install.sh | sh    # Linux / macOS
 irm https://kjarni.ai/install.ps1 | iex         # Windows
 ```
 
-**Python** *(pre-release)*
+**Python**
 
 ```bash
-pip install --pre kjarni
+pip install kjarni          # no dependencies at all
+pip install kjarni[numpy]   # adds ndarray returns from encode_batch
 ```
 
-**Rust** *(pre-release)*
+The plain install pulls nothing: no PyTorch, no ONNX Runtime, no numpy. The native
+library ships inside the wheel and the vectors match `sentence-transformers` to four
+decimal places.
+
+**Rust**
 
 ```bash
-cargo add kjarni@0.0.1-alpha.1
+cargo add kjarni
 ```
 
 **C++** — no package manager. Four commands from nothing to output:
@@ -175,7 +182,7 @@ sim, _ := e.Similarity("doctor", "physician")
 fmt.Println(sim)                                                 // 0.8598
 ```
 
-**Python** *(pre-release)*
+**Python**
 
 ```python
 from kjarni import Classifier
@@ -184,7 +191,7 @@ classifier = Classifier("distilbert-sentiment")
 print(classifier.classify("i love kjarni").label)                # positive
 ```
 
-**Rust** *(pre-release)*
+**Rust**
 
 ```rust
 let result = classifier::classify("distilbert-sentiment", "I love this product!").await?;
@@ -448,6 +455,7 @@ Requires Rust 1.91.1 or newer.
 - [Semantic Search in C# — Without a Vector Database](https://kjarni.ai/blog/semanticsearch/)
 - [Build a Document Search Engine in C#](https://kjarni.ai/blog/documentsearchengine/)
 - [Sentiment Analysis in C# — Without Python or External APIs](https://kjarni.ai/blog/sentimentanalysis/)
+- [Semantic Search in C++ without Python, libtorch or ONNX Runtime](https://kjarni.ai/blog/cppinference/)
 - [Why I Built a Native ML Inference Engine in Rust](https://kjarni.ai/blog/nativeinference/)
 
 ## License

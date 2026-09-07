@@ -84,6 +84,17 @@ pub enum Commands {
         /// Suppress status messages
         #[arg(short, long)]
         quiet: bool,
+
+        /// Draft model for speculative decoding. Must share the target's
+        /// vocabulary: a small model of the same family, such as
+        /// qwen2.5-0.5b-instruct drafting for qwen2.5-1.5b.
+        #[arg(long)]
+        draft: Option<String>,
+
+        /// Tokens the draft proposes per round. Higher trades wasted draft work
+        /// against fewer passes over the target's weights.
+        #[arg(long, default_value_t = 4)]
+        draft_tokens: usize,
     },
 
     /// Summarize text
@@ -397,6 +408,15 @@ pub enum Commands {
         /// Suppress progress output
         #[arg(short, long)]
         quiet: bool,
+
+        /// Draft model for speculative decoding. Must share the target's
+        /// vocabulary, such as qwen2.5-0.5b-instruct drafting for qwen2.5-1.5b.
+        #[arg(long)]
+        draft: Option<String>,
+
+        /// Tokens the draft proposes per round.
+        #[arg(long, default_value_t = 4)]
+        draft_tokens: usize,
     },
 
     /// Create or manage search indexes

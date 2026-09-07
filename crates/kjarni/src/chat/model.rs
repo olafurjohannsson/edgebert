@@ -130,6 +130,14 @@ impl Chat {
             mode_overrides.max_new_tokens = Some(builder.mode.default_max_tokens());
         }
 
+        if let Some(ref draft) = builder.draft_model {
+            gen_builder = gen_builder.draft(draft, builder.draft_tokens);
+        }
+
+        if let Some(tokens) = builder.prefix_cache_tokens {
+            gen_builder = gen_builder.prefix_cache_tokens(tokens);
+        }
+
         gen_builder = gen_builder.generation_config(mode_overrides.clone());
 
         let generator = gen_builder.build().await.map_err(|e| match e {

@@ -8,7 +8,7 @@
 
     <!-- Package metadata -->
     <PackageId>Kjarni</PackageId>
-    <Version>0.1.10</Version>
+    <Version>0.2.0</Version>
     <Authors>Ólafur Aron Jóhannsson</Authors>
     <Description>Local AI inference for .NET: embeddings, classification, reranking and search, running in your process. No Python runtime, no ONNX Runtime, no Ollama daemon, no CUDA toolkit. GPU support runs on Vulkan, DirectX 12 and Metal, so AMD, Intel and Apple Silicon work without NVIDIA.</Description>
     <PackageTags>ai;ml;embeddings;classification;reranking;rag;search;nlp;inference;transformers;local;offline;dotnet;csharp;onnx;sentence-transformers;semantic-kernel;microsoft-extensions-ai;gpu;webgpu</PackageTags>

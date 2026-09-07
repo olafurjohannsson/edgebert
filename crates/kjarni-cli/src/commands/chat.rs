@@ -41,6 +41,8 @@ pub async fn run(
     max_tokens: usize,
     gpu: bool,
     quiet: bool,
+    draft: Option<&str>,
+    draft_tokens: usize,
 ) -> Result<()> {
     // Fail on an unknown model here, with suggestions, rather than letting the
     // builder report it without context.
@@ -64,6 +66,12 @@ pub async fn run(
         builder = builder.gpu();
     } else {
         builder = builder.cpu();
+    }
+
+    if let Some(draft_name) = draft {
+        // Fail here with suggestions rather than inside the builder.
+        let _ = crate::commands::util::resolve_model(draft_name, Some("decoder"))?;
+        builder = builder.draft(draft_name, draft_tokens);
     }
 
     if let Some(system) = system_prompt {

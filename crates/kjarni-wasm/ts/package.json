@@ -1,6 +1,6 @@
 {
   "name": "kjarni-wasm",
-  "version": "0.1.10",
+  "version": "0.2.0",
   "description": "Local AI inference in the browser: embeddings, classification, reranking, semantic search and chat, running in a Web Worker.",
   "type": "module",
   "main": "./dist/index.js",
