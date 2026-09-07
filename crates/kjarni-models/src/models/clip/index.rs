@@ -215,8 +215,91 @@ fn filename_words(path: &Path) -> String {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or_default();
-    stem.split(|c: char| !c.is_alphanumeric())
+    let words: Vec<&str> = stem
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect();
+    if words.is_empty() {
+        // Fall back to the raw filename rather than indexing an image with no
+        // searchable text at all. `DocumentLoader` does the same, and the two
+        // used to disagree on exactly this case.
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Filenames are often the only words a photo has, so they are worth keeping
+    /// alongside the vector for keyword matching. This is not a caption and does
+    /// not pretend to be one.
+    #[test]
+    fn filenames_become_searchable_words() {
+        for (path, want) in [
+            (
+                "/p/IMG_2024-08-14_beach_sunset.jpg",
+                "IMG 2024 08 14 beach sunset",
+            ),
+            ("/p/holiday.png", "holiday"),
+            ("/p/DSC00123.JPG", "DSC00123"),
+            ("/p/a.b.c/photo-01.jpeg", "photo 01"),
+        ] {
+            assert_eq!(filename_words(Path::new(path)), want, "for {path}");
+        }
+    }
+
+    /// A name with nothing word-like must not become an empty string, or the
+    /// image is indexed with no searchable text at all. Falls back to the raw
+    /// filename, which is what `DocumentLoader` does for the same case.
+    #[test]
+    fn a_nameless_file_falls_back_to_the_filename() {
+        assert_eq!(filename_words(Path::new("/p/___.png")), "___.png");
+        assert_eq!(filename_words(Path::new("/p/.hidden")), "hidden");
+        assert_eq!(filename_words(Path::new("/p/---.jpg")), "---.jpg");
+    }
+
+    /// Round-tripping an index must preserve the vectors exactly. A float that
+    /// drifts through JSON would change every score by a little, which is the kind
+    /// of thing that never fails and quietly degrades ranking.
+    #[test]
+    fn entries_survive_a_json_round_trip() {
+        let entries = vec![
+            IndexedImage {
+                path: PathBuf::from("/photos/beach.jpg"),
+                embedding: vec![0.1, -0.25, 0.333_333_34, 1.0, -1.0],
+                filename_text: "beach".to_string(),
+            },
+            IndexedImage {
+                path: PathBuf::from("/photos/a b/c.png"),
+                embedding: vec![0.0; 5],
+                filename_text: "c".to_string(),
+            },
+        ];
+
+        let json = serde_json::to_vec(&entries).expect("serialise");
+        let back: Vec<IndexedImage> = serde_json::from_slice(&json).expect("parse");
+
+        assert_eq!(back.len(), entries.len());
+        for (a, b) in entries.iter().zip(&back) {
+            assert_eq!(a.path, b.path, "paths with spaces must survive");
+            assert_eq!(a.filename_text, b.filename_text);
+            assert_eq!(a.embedding, b.embedding, "vectors must be bit-identical");
+        }
+    }
+
+    /// The scan report has to distinguish "indexed nothing" from "failed at
+    /// everything", or a directory of corrupt files looks like an empty one.
+    #[test]
+    fn a_fresh_report_counts_nothing() {
+        let r = ScanReport::default();
+        assert_eq!(r.added, 0);
+        assert_eq!(r.skipped, 0);
+        assert!(r.failures.is_empty());
+    }
 }

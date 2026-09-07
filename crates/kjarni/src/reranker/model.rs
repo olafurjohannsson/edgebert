@@ -12,6 +12,33 @@ use super::builder::RerankerBuilder;
 use super::types::{RerankOverrides, RerankResult, RerankerError, RerankerResult};
 use super::validation::validate_for_reranking;
 
+/// Turns raw cross-encoder logits into the scores a caller sees, then applies the
+/// threshold in that same space.
+///
+/// Separated from `rerank_with_config` so the transform can be tested without a
+/// model: it is the whole of the behaviour change, and the part most likely to
+/// break someone quietly.
+///
+/// A cross-encoder emits a logit, which for ms-marco runs from about -11 to +11
+/// and means nothing to a caller. Squashing it to a probability is what
+/// `return_raw_scores: false` has always promised and never done, and it is safe
+/// to change: sigmoid is monotonic, so every ranking is unchanged and only the
+/// printed numbers move.
+///
+/// The threshold is compared *after* the transform, so it is always read on
+/// whichever scale the scores are on. Comparing a 0..1 threshold against logits
+/// would silently pass almost everything.
+fn score_and_filter(
+    ranked: Vec<(usize, f32)>,
+    overrides: &RerankOverrides,
+) -> impl Iterator<Item = (usize, f32)> + '_ {
+    let raw = overrides.return_raw_scores;
+    ranked
+        .into_iter()
+        .map(move |(index, logit)| (index, if raw { logit } else { sigmoid(logit) }))
+        .filter(move |(_, score)| overrides.threshold.map(|t| *score >= t).unwrap_or(true))
+}
+
 /// Logistic squash, saturating rather than overflowing at the extremes.
 ///
 /// `exp(-x)` for x around -100 is inf, and inf/inf is NaN, which would sort
@@ -270,28 +297,7 @@ impl Reranker {
             .await
             .map_err(RerankerError::RerankingFailed)?;
 
-        // A cross-encoder emits a logit, which for ms-marco runs from about -11 to
-        // +11 and means nothing to a caller. Squashing it to a probability is what
-        // `return_raw_scores: false` has always promised and never done, and it is
-        // safe to change: sigmoid is monotonic, so every ranking is unchanged and
-        // only the printed numbers move.
-        //
-        // `threshold` is compared after the same transform, so it is always read in
-        // whatever space the scores are in. Interpreting a 0..1 threshold against
-        // logits would silently pass almost everything.
-        let score_of = |raw: f32| {
-            if merged.return_raw_scores {
-                raw
-            } else {
-                sigmoid(raw)
-            }
-        };
-
-        // Convert to results and apply filters
-        let mut results: Vec<RerankResult> = ranked
-            .into_iter()
-            .map(|(index, raw)| (index, score_of(raw)))
-            .filter(|(_, score)| merged.threshold.map(|t| *score >= t).unwrap_or(true))
+        let mut results: Vec<RerankResult> = score_and_filter(ranked, &merged)
             .map(|(index, score)| RerankResult {
                 index,
                 score,
@@ -395,5 +401,149 @@ impl Reranker {
                 || self.default_overrides.return_raw_scores,
             batch_size: runtime.batch_size.or(self.default_overrides.batch_size),
         }
+    }
+}
+
+#[cfg(test)]
+mod scoring_tests {
+    use super::*;
+
+    fn overrides(raw: bool, threshold: Option<f32>) -> RerankOverrides {
+        RerankOverrides {
+            top_k: None,
+            threshold,
+            return_raw_scores: raw,
+            batch_size: None,
+        }
+    }
+
+    /// Values taken from a real ms-marco run: these are the logits the quickstart
+    /// printed before the squash, and what a caller sees now.
+    #[test]
+    fn sigmoid_matches_the_reference() {
+        // Computed as `1/(1+exp(-x))` in float32, not written from memory.
+        for (logit, want) in [
+            (0.0f32, 0.500_000_00f32),
+            (1.3282, 0.790_542_72),
+            (-10.5874, 0.000_025_231),
+            (-11.0939, 0.000_015_205),
+            (2.0, 0.880_797_03),
+            (-2.0, 0.119_202_93),
+        ] {
+            let got = sigmoid(logit);
+            assert!(
+                (got - want).abs() < 1e-5,
+                "sigmoid({logit}) = {got}, expected {want}"
+            );
+        }
+    }
+
+    /// The reason `sigmoid` is written with two branches rather than the obvious
+    /// one-liner. `exp(-x)` for a large negative x is `inf`, and `inf / inf` is
+    /// `NaN`, which sorts unpredictably and would scramble a ranking rather than
+    /// merely mis-scale it. Anyone "simplifying" this should fail here.
+    #[test]
+    fn sigmoid_saturates_instead_of_producing_nan() {
+        for x in [
+            -1000.0f32,
+            -100.0,
+            -50.0,
+            50.0,
+            100.0,
+            1000.0,
+            f32::MIN,
+            f32::MAX,
+        ] {
+            let got = sigmoid(x);
+            assert!(got.is_finite(), "sigmoid({x}) was {got}");
+            assert!((0.0..=1.0).contains(&got), "sigmoid({x}) = {got} left 0..1");
+        }
+        assert_eq!(sigmoid(-1000.0), 0.0);
+        assert_eq!(sigmoid(1000.0), 1.0);
+    }
+
+    /// The claim that made this change safe to ship: squashing cannot reorder
+    /// results, so every existing ranking is preserved and only the numbers move.
+    #[test]
+    fn squashing_never_changes_the_ranking() {
+        let logits: Vec<f32> = vec![
+            1.3282, -10.5874, -11.0939, 0.0, 7.5, -3.25, 2.0, -0.001, 11.0, -11.0,
+        ];
+
+        let mut by_logit: Vec<usize> = (0..logits.len()).collect();
+        by_logit.sort_by(|a, b| logits[*b].total_cmp(&logits[*a]));
+
+        let squashed: Vec<f32> = logits.iter().map(|l| sigmoid(*l)).collect();
+        let mut by_score: Vec<usize> = (0..squashed.len()).collect();
+        by_score.sort_by(|a, b| squashed[*b].total_cmp(&squashed[*a]));
+
+        assert_eq!(
+            by_logit, by_score,
+            "sigmoid reordered results; the transform must be monotonic"
+        );
+    }
+
+    #[test]
+    fn scores_are_probabilities_by_default() {
+        let ranked = vec![(0, 1.3282f32), (1, -10.5874), (2, -11.0939)];
+        let out: Vec<(usize, f32)> = score_and_filter(ranked, &overrides(false, None)).collect();
+
+        assert_eq!(out.len(), 3, "no threshold means nothing is dropped");
+        assert!((out[0].1 - 0.790_542_72).abs() < 1e-6);
+        for (_, s) in &out {
+            assert!((0.0..=1.0).contains(s), "score {s} is not a probability");
+        }
+    }
+
+    #[test]
+    fn raw_scores_are_passed_through_untouched() {
+        let ranked = vec![(0, 1.3282f32), (1, -10.5874)];
+        let out: Vec<(usize, f32)> = score_and_filter(ranked, &overrides(true, None)).collect();
+        assert_eq!(out, vec![(0, 1.3282), (1, -10.5874)]);
+    }
+
+    /// The half most likely to break someone quietly. A threshold has to be read
+    /// on whichever scale the scores are on: 0.5 against probabilities keeps one
+    /// document here, while 0.5 against logits would keep the same one for an
+    /// entirely different reason, and 0.5 applied to the wrong scale would let
+    /// everything through.
+    #[test]
+    fn threshold_is_read_on_the_same_scale_as_the_scores() {
+        let ranked = vec![(0, 1.3282f32), (1, -10.5874), (2, -11.0939)];
+
+        // Probabilities: only the 0.79 document clears 0.5.
+        let kept: Vec<usize> = score_and_filter(ranked.clone(), &overrides(false, Some(0.5)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            kept,
+            vec![0],
+            "0.5 as a probability should keep only the match"
+        );
+
+        // Raw logits: 0.5 is a logit here, and only the 1.33 document clears it.
+        let kept: Vec<usize> = score_and_filter(ranked.clone(), &overrides(true, Some(0.5)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(kept, vec![0], "0.5 as a logit should keep only the match");
+
+        // The failure this guards against: a probability threshold compared
+        // against logits. -1.0 is below every logit here, so everything would
+        // survive, which is what a mis-scaled threshold looks like in production.
+        let kept: Vec<usize> = score_and_filter(ranked, &overrides(true, Some(-1.0)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(kept, vec![0], "only one logit is above -1.0");
+    }
+
+    #[test]
+    fn a_threshold_above_everything_returns_nothing() {
+        let ranked = vec![(0, 1.3282f32), (1, -10.5874)];
+        let out: Vec<(usize, f32)> =
+            score_and_filter(ranked, &overrides(false, Some(0.999))).collect();
+        assert!(
+            out.is_empty(),
+            "nothing should clear a 0.999 probability here"
+        );
     }
 }

@@ -427,3 +427,28 @@ mod rope_scaling_config_tests {
         assert_eq!(cfg, RopeScalingConfig::default());
     }
 }
+
+#[cfg(test)]
+mod load_config_tests {
+    use super::*;
+
+    /// Silence has to be opt-in. All three pipeline loaders used to hardcode
+    /// `quiet: true`, so a first call on an uncached model downloaded hundreds of
+    /// megabytes with no output and read as a hang. A `..Default::default()`
+    /// somewhere flipping this back would restore that in silence, which is
+    /// exactly the failure it caused the first time.
+    #[test]
+    fn downloads_are_visible_unless_asked_otherwise() {
+        assert!(
+            !ModelLoadConfig::default().quiet,
+            "a default load must report that it is downloading"
+        );
+    }
+
+    /// The GPU presets are about placement and precision; none of them is a reason
+    /// to go quiet.
+    #[test]
+    fn presets_do_not_silence_downloads() {
+        assert!(!ModelLoadConfig::full_gpu().quiet);
+    }
+}
