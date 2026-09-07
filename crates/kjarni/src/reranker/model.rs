@@ -12,6 +12,20 @@ use super::builder::RerankerBuilder;
 use super::types::{RerankOverrides, RerankResult, RerankerError, RerankerResult};
 use super::validation::validate_for_reranking;
 
+/// Logistic squash, saturating rather than overflowing at the extremes.
+///
+/// `exp(-x)` for x around -100 is inf, and inf/inf is NaN, which would sort
+/// unpredictably. Cross-encoder logits do not reach that far, but a sort key is
+/// the wrong place to rely on that.
+fn sigmoid(x: f32) -> f32 {
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
+
 /// High-level text reranker using cross-encoder models.
 ///
 /// Cross-encoders process query-document pairs together, producing
@@ -256,9 +270,27 @@ impl Reranker {
             .await
             .map_err(RerankerError::RerankingFailed)?;
 
+        // A cross-encoder emits a logit, which for ms-marco runs from about -11 to
+        // +11 and means nothing to a caller. Squashing it to a probability is what
+        // `return_raw_scores: false` has always promised and never done, and it is
+        // safe to change: sigmoid is monotonic, so every ranking is unchanged and
+        // only the printed numbers move.
+        //
+        // `threshold` is compared after the same transform, so it is always read in
+        // whatever space the scores are in. Interpreting a 0..1 threshold against
+        // logits would silently pass almost everything.
+        let score_of = |raw: f32| {
+            if merged.return_raw_scores {
+                raw
+            } else {
+                sigmoid(raw)
+            }
+        };
+
         // Convert to results and apply filters
         let mut results: Vec<RerankResult> = ranked
             .into_iter()
+            .map(|(index, raw)| (index, score_of(raw)))
             .filter(|(_, score)| merged.threshold.map(|t| *score >= t).unwrap_or(true))
             .map(|(index, score)| RerankResult {
                 index,
@@ -293,7 +325,10 @@ impl Reranker {
         .await
     }
 
-    /// Rerank with a minimum score threshold.
+    /// Rerank, keeping only results at or above `threshold`.
+    ///
+    /// `threshold` is on the same scale as `score`: 0..1 by default, or raw
+    /// logits if `return_raw_scores` is set.
     pub async fn rerank_with_threshold(
         &self,
         query: &str,

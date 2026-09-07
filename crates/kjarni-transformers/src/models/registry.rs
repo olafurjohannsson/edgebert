@@ -1117,7 +1117,11 @@ struct PermanentIfClientError {
 #[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Display for PermanentIfClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Failed to download {}: HTTP {}", self.filename, self.status)
+        write!(
+            f,
+            "Failed to download {}: HTTP {}",
+            self.filename, self.status
+        )
     }
 }
 

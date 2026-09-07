@@ -177,24 +177,21 @@ fn format_results_pretty(results: &[SearchResult], query: &str) -> String {
         query.white().bold()
     ));
 
-    // Normalize scores to 0-1 range for display
+    // Bars are drawn relative to the best hit, not stretched across the range of
+    // this page. Min-max normalising forced the last result to exactly 0.0%
+    // however relevant it was, which reads as "no match" rather than "ranked
+    // last". The three score types reaching here are all positive: reranker
+    // probabilities, cosine similarity, and reciprocal-rank-fusion weights, whose
+    // absolute values differ by an order of magnitude and are not comparable
+    // across modes, which is why this is a bar and not a percentage claim.
     let max_score = results
         .iter()
         .map(|r| r.score)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let min_score = results
-        .iter()
-        .map(|r| r.score)
-        .fold(f32::INFINITY, f32::min);
-    let score_range = (max_score - min_score).max(1e-6);
+        .fold(f32::NEG_INFINITY, f32::max)
+        .max(1e-6);
 
     for (i, r) in results.iter().enumerate() {
-        // Normalize score to 0-1 for visual display
-        let norm_score = if results.len() == 1 {
-            r.score.clamp(0.0, 1.0)
-        } else {
-            ((r.score - min_score) / score_range).clamp(0.0, 1.0)
-        };
+        let norm_score = (r.score / max_score).clamp(0.0, 1.0);
 
         let source = r
             .metadata

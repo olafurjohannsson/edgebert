@@ -60,7 +60,11 @@ pub struct RerankResult {
     /// Original index in the input documents.
     pub index: usize,
 
-    /// Relevance score (higher = more relevant).
+    /// Relevance, 0..1, higher is more relevant.
+    ///
+    /// A probability rather than the cross-encoder's raw logit, unless
+    /// `return_raw_scores` was set. Comparable across queries only loosely: it is
+    /// calibrated for ranking, not as a confidence.
     pub score: f32,
 
     /// The document text.
@@ -103,7 +107,11 @@ pub struct RerankOverrides {
     /// Minimum score threshold.
     pub threshold: Option<f32>,
 
-    /// Return raw logits instead of scores.
+    /// Return the cross-encoder's raw logit instead of a 0..1 probability.
+    ///
+    /// Off by default, so `score` is a probability and `threshold` is read on the
+    /// same scale. Turn it on only to recover the underlying logit; ranking is
+    /// identical either way, because the squash is monotonic.
     pub return_raw_scores: bool,
 
     /// Batch size for processing pairs.

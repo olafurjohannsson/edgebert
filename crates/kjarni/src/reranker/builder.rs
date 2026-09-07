@@ -141,7 +141,10 @@ impl RerankerBuilder {
         self
     }
 
-    /// Set whether to return raw scores (no sigmoid).
+    /// Return raw cross-encoder logits rather than 0..1 probabilities.
+    ///
+    /// Ranking is unaffected: the squash is monotonic. This only changes the
+    /// numbers, and `threshold` is interpreted on whichever scale is in use.
     pub fn return_raw_scores(mut self, raw: bool) -> Self {
         self.overrides.return_raw_scores = raw;
         self
