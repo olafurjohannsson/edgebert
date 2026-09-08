@@ -29,3 +29,10 @@ walkdir = "2.5.0"
 tempfile = "3.23.0"
 [lints]
 workspace = true
+
+[features]
+default = ["image-io"]
+
+# On by default here, unlike the library: someone running the CLI wants
+# `kjarni image index ~/Photos` to work without rebuilding with a flag.
+image-io = ["kjarni/image-io"]

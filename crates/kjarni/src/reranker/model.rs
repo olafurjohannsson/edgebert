@@ -252,19 +252,41 @@ impl Reranker {
     }
 
     /// Score a single query-document pair.
+    /// Relevance of one document to one query, on the same scale as
+    /// [`RerankResult::score`].
+    ///
+    /// 0..1 unless the reranker was built with `return_raw_scores`. This has to
+    /// agree with `rerank`: the two used to disagree, so scoring a pair directly
+    /// gave a logit while ranking the same pair gave a probability, and nothing
+    /// said which you had.
     pub async fn score(&self, query: &str, document: &str) -> RerankerResult<f32> {
-        self.inner
+        let raw = self
+            .inner
             .predict_pair(query, document)
             .await
-            .map_err(RerankerError::RerankingFailed)
+            .map_err(RerankerError::RerankingFailed)?;
+        Ok(self.present(raw))
+    }
+
+    /// Applies the same transform `rerank` applies, so every score this type
+    /// hands out is on one scale.
+    fn present(&self, raw: f32) -> f32 {
+        if self.default_overrides.return_raw_scores {
+            raw
+        } else {
+            sigmoid(raw)
+        }
     }
 
     /// Score multiple query-document pairs.
+    /// Score multiple query-document pairs, on the same scale as [`Self::score`].
     pub async fn score_pairs(&self, pairs: &[(&str, &str)]) -> RerankerResult<Vec<f32>> {
-        self.inner
+        let raw = self
+            .inner
             .predict_pairs(pairs)
             .await
-            .map_err(RerankerError::RerankingFailed)
+            .map_err(RerankerError::RerankingFailed)?;
+        Ok(raw.into_iter().map(|r| self.present(r)).collect())
     }
 
     /// Rerank documents by relevance to a query.

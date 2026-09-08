@@ -258,6 +258,21 @@ async fn main() -> Result<()> {
 
         Commands::Index { action } => commands::index::run(action).await,
 
+        #[cfg(feature = "image-io")]
+        Commands::Image { action } => match action {
+            kjarni_cli::ImageCommands::Index {
+                inputs,
+                output,
+                quiet,
+            } => commands::image::index(&inputs, &output, quiet).await,
+            kjarni_cli::ImageCommands::Search {
+                index_path,
+                query,
+                top_k,
+                quiet,
+            } => commands::image::search(&index_path, &query, top_k, quiet).await,
+        },
+
         Commands::Search {
             index_path,
             query,

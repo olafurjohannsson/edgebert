@@ -12,14 +12,22 @@ use kjarni_models::models::clip::{ClipConfig, ClipTextModel, ClipVisionModel};
 use ndarray::Array3;
 use std::path::PathBuf;
 
+/// Committed fixtures, so these run with no environment set and no PyTorch.
+///
+/// `KJARNI_CLIP_FIXTURES` overrides, which is what `bench/clip_reference.py`
+/// writes when regenerating.
 fn fixtures() -> Option<PathBuf> {
-    let dir = PathBuf::from(std::env::var("KJARNI_CLIP_FIXTURES").ok()?);
-    assert!(
-        dir.is_dir(),
-        "KJARNI_CLIP_FIXTURES is set to {} which is not a directory",
-        dir.display()
-    );
-    Some(dir)
+    if let Ok(dir) = std::env::var("KJARNI_CLIP_FIXTURES") {
+        let dir = PathBuf::from(dir);
+        assert!(
+            dir.is_dir(),
+            "KJARNI_CLIP_FIXTURES is set to {} which is not a directory",
+            dir.display()
+        );
+        return Some(dir);
+    }
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/clip");
+    dir.is_dir().then_some(dir)
 }
 
 fn model_dir() -> Option<PathBuf> {

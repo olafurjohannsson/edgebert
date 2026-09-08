@@ -20,6 +20,15 @@ pub use kjarni_models::SequenceClassifier;
 pub use kjarni_models::models::cross_encoder::CrossEncoder;
 pub use kjarni_models::models::sentence_encoder::SentenceEncoder;
 
+/// Image search: embed photos and query them by description.
+///
+/// Behind `image-io` because walking a directory means decoding JPEG and PNG.
+/// The towers themselves need none of that and take raw pixels.
+#[cfg(feature = "image-io")]
+pub use kjarni_models::models::clip::{
+    ClipTextModel, ClipTokenizer, ClipVisionModel, ImageHit, ImageIndex, IndexedImage, ScanReport,
+};
+
 pub use crate::classifier::Classifier;
 pub use crate::embedder::Embedder;
 pub use crate::indexer::Indexer;

@@ -9,8 +9,13 @@
 use kjarni_models::models::clip::ImageIndex;
 use std::path::PathBuf;
 
+/// Committed alongside the other fixtures, so this runs with nothing set up.
 fn photos() -> Option<PathBuf> {
-    let dir = PathBuf::from(std::env::var("KJARNI_CLIP_PHOTOS").ok()?);
+    if let Ok(dir) = std::env::var("KJARNI_CLIP_PHOTOS") {
+        let dir = PathBuf::from(dir);
+        return dir.is_dir().then_some(dir);
+    }
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/clip/photos");
     dir.is_dir().then_some(dir)
 }
 

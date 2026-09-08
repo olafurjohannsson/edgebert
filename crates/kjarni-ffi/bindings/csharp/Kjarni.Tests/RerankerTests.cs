@@ -22,33 +22,36 @@ namespace Kjarni.Tests
         [InlineData(
             "What is machine learning?",
             "Machine learning is a subset of artificial intelligence that enables systems to learn from data.",
-            11.063f)]
+            0.999984f)]
         [InlineData(
             "What is machine learning?",
             "The weather today is sunny with a high of 72 degrees.",
-            -11.091f)]
+            0.000015f)]
         [InlineData(
             "query",
             "document text",
-            -10.537f)]
+            0.000027f)]
         [InlineData(
             "deep learning neural networks",
             "Neural networks learn hierarchical representations.",
-            0.972f)]
+            0.725518f)]
         [InlineData(
             "deep learning neural networks",
             "Python is a programming language.",
-            -11.327f)]
+            0.000012f)]
         [InlineData(
             "deep learning neural networks",
             "The cat sat on the mat.",
-            -11.313f)]
+            0.000012f)]
         public void Score_ExactValues(string query, string document, float expected)
         {
             var score = _reranker.Score(query, document);
             _output.WriteLine($"\"{query}\" / \"{document}\": {score:F6}");
 
-            Assert.Equal(expected, score, 2);
+            // Six places, not two: these are probabilities now, and several of
+            // them differ only in the fifth decimal. At two places every
+            // irrelevant document is 0.00 and the assertion tests nothing.
+            Assert.Equal(expected, score, 6);
         }
 
         [Fact]
@@ -183,7 +186,7 @@ namespace Kjarni.Tests
 
             Assert.Single(results);
             Assert.Equal(1, results[0].Index);
-            Assert.Equal(-5.181f, results[0].Score, 2);
+            Assert.Equal(0.005591f, results[0].Score, 4);
 
             _output.WriteLine($"Top result: [{results[0].Index}] {results[0].Score:F6} {results[0].Document}");
         }

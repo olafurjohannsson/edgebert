@@ -1,0 +1,43 @@
+[
+ {
+  "text": "a photo of a dog",
+  "ids": [
+   49406,
+   320,
+   1125,
+   539,
+   320,
+   1929,
+   49407
+  ],
+  "eos_index": 6
+ },
+ {
+  "text": "a red sports car on a mountain road",
+  "ids": [
+   49406,
+   320,
+   736,
+   2054,
+   1615,
+   525,
+   320,
+   3965,
+   1759,
+   49407
+  ],
+  "eos_index": 9
+ },
+ {
+  "text": "sunset over the ocean",
+  "ids": [
+   49406,
+   3424,
+   962,
+   518,
+   4918,
+   49407
+  ],
+  "eos_index": 5
+ }
+]

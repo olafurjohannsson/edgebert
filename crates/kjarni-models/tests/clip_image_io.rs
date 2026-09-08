@@ -9,7 +9,12 @@ use kjarni_models::models::clip::{ClipVisionModel, decode_image_file};
 use std::path::PathBuf;
 
 fn fixtures() -> Option<PathBuf> {
-    let dir = PathBuf::from(std::env::var("KJARNI_CLIP_FIXTURES").ok()?);
+    if let Ok(dir) = std::env::var("KJARNI_CLIP_FIXTURES") {
+        return PathBuf::from(dir)
+            .is_dir()
+            .then(|| PathBuf::from(std::env::var("KJARNI_CLIP_FIXTURES").unwrap()));
+    }
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/clip");
     dir.is_dir().then_some(dir)
 }
 
