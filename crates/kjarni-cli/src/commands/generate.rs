@@ -77,10 +77,6 @@ pub async fn run(
     // quantised model: the registry has no GGUF entries, so `llama3.2-3b-instruct`
     // resolves to the 6GB bf16 copy and decode streams four times the weights a
     // Q4_K_M file would.
-    // Quantized weights are a different file, not a different code path: the
-    // loader picks GGUF only when asked, and nothing asked until now. Measured on
-    // an RTX A2000, llama3.2-3b decodes 24.5 tok/s from Q4_K_M against 8.7 from
-    // full-precision safetensors, and the GGUF was already in the cache.
     let load_cfg = gguf.then(|| {
         LoadConfigBuilder::new()
             .prefer_gguf(true)

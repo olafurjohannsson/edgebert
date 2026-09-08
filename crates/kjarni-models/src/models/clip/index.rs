@@ -49,9 +49,7 @@ pub struct ScanReport {
     /// Extensions that look like images but have no decoder, and how many of each.
     ///
     /// Separate from `failures` because these never reach a decoder: the loader
-    /// filters them out by extension. Counted because otherwise they vanish. An
-    /// iPhone library is mostly HEIC, so pointing this at one and reporting only
-    /// the JPEGs would silently index about half of it.
+    /// filters them out by extension. Counted because otherwise they vanish.
     pub unsupported: std::collections::BTreeMap<String, usize>,
 }
 

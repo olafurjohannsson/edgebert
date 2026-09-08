@@ -211,9 +211,10 @@ const CHAT_KJQ: &str = "../../../web.kjarni.ai/src/static/models/qwen05b-q8.kjq"
     ignore = "decoder generation is orders of magnitude slower unoptimised; run with --release"
 )]
 async fn decoder_loads_from_kjq_bytes_and_generates() {
-    // `DecoderLoader::load_from_bytes` was added for the browser: there is no
-    // filesystem there, so the file-backed loaders cannot be used. It had no test,
-    // only a manual run, which is how a loader silently regresses.
+    // The browser has no filesystem, so the file-backed loaders cannot be used.
+    // `load_from_kjq` is the call it makes: a KJQ8 container keeps its weights in
+    // `blocks` rather than in `safetensors`, so `load_from_bytes` cannot see them
+    // and fails with a bare "tensor not found".
     use kjarni_transformers::pipeline::DecoderLoader;
 
     let Some(bytes) = fixture(CHAT_KJQ) else {
@@ -223,14 +224,12 @@ async fn decoder_loads_from_kjq_bytes_and_generates() {
 
     let unpacked = kjq::unpack(&bytes).expect("unpack .kjq");
 
-    let model: kjarni_models::models::qwen::QwenModel = DecoderLoader::load_from_bytes(
-        &unpacked.safetensors,
-        &unpacked.config_json,
-        unpacked.tokenizer_json.as_bytes(),
+    let model: kjarni_models::models::qwen::QwenModel = DecoderLoader::load_from_kjq(
+        &unpacked,
         None,
         Some(kjarni_transformers::models::ModelType::Qwen2_5_0_5B_Instruct),
     )
-    .expect("decoder loads from bytes");
+    .expect("decoder loads from .kjq");
 
     // Loading is only half of it: a model that loads but cannot generate would pass
     // a construction-only assertion.

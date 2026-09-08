@@ -60,9 +60,6 @@ pub async fn index(inputs: &[String], output: &str, quiet: bool) -> Result<()> {
         }
     }
 
-    // Formats with no decoder are counted by extension rather than named: an
-    // iPhone library is mostly HEIC, and listing eleven hundred paths would bury
-    // the number that matters.
     if !unsupported.is_empty() {
         let total: usize = unsupported.values().sum();
         let kinds: Vec<String> = unsupported
