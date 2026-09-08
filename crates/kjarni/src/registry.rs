@@ -639,10 +639,15 @@ mod tests {
     #[test]
     fn test_model_groups_cover_all_models() {
         let all_models = list_models();
+        // Must list every value `display_group()` can return. This is the third
+        // place that list is written out by hand, and the second time adding a
+        // model broke one of them, so any new group needs updating here, in
+        // `kjarni-cli/src/commands/model.rs`, and in `display_group()` itself.
         let groups = [
             "LLM (Decoder)",
             "Seq2Seq",
             "Embedding",
+            "Image Embedding",
             "Re-Ranker",
             "Classifier",
             "Generation (Decoder)",

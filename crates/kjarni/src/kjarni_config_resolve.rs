@@ -42,6 +42,9 @@ impl KjarniConfig {
             use_gguf: self.load.prefer_gguf,
             max_batch_size: self.load.max_batch_size,
             max_sequence_length: self.load.max_sequence_length,
+            // Download progress follows the caller's own quiet setting, which the
+            // builders already thread through; this resolver has none of its own.
+            quiet: false,
         };
 
         // Apply model-specific overrides

@@ -174,6 +174,13 @@ pub struct ModelLoadConfig {
     pub max_sequence_length: Option<usize>,
     /// Use gguf
     pub use_gguf: bool,
+    /// Suppress download progress output.
+    ///
+    /// Defaults to false, so a load that has to fetch weights says so. The three
+    /// pipeline loaders used to hardcode this to quiet, which meant a first call
+    /// on an uncached model downloaded hundreds of megabytes in total silence and
+    /// looked to the caller like a hang.
+    pub quiet: bool,
 }
 
 impl ModelLoadConfig {
@@ -418,5 +425,30 @@ mod rope_scaling_config_tests {
     fn an_empty_object_parses_to_defaults() {
         let cfg: RopeScalingConfig = serde_json::from_str("{}").expect("empty scaling");
         assert_eq!(cfg, RopeScalingConfig::default());
+    }
+}
+
+#[cfg(test)]
+mod load_config_tests {
+    use super::*;
+
+    /// Silence has to be opt-in. All three pipeline loaders used to hardcode
+    /// `quiet: true`, so a first call on an uncached model downloaded hundreds of
+    /// megabytes with no output and read as a hang. A `..Default::default()`
+    /// somewhere flipping this back would restore that in silence, which is
+    /// exactly the failure it caused the first time.
+    #[test]
+    fn downloads_are_visible_unless_asked_otherwise() {
+        assert!(
+            !ModelLoadConfig::default().quiet,
+            "a default load must report that it is downloading"
+        );
+    }
+
+    /// The GPU presets are about placement and precision; none of them is a reason
+    /// to go quiet.
+    #[test]
+    fn presets_do_not_silence_downloads() {
+        assert!(!ModelLoadConfig::full_gpu().quiet);
     }
 }

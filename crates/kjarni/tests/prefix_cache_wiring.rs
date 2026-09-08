@@ -37,6 +37,10 @@ async fn generator(prefix_cache: bool) -> Generator {
 /// same greedy decode, same text, whether or not a previous call left a prefix
 /// behind. A cache that changes the answer is worse than no cache.
 #[tokio::test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "decoder generation is orders of magnitude slower unoptimised; run with --release"
+)]
 async fn reuse_is_faster_and_does_not_change_the_answer() {
     let shared = shared_document();
     let first_prompt = format!("{shared}\nQ: What is the capital of France?\nA:");
@@ -89,6 +93,10 @@ async fn reuse_is_faster_and_does_not_change_the_answer() {
 /// A cold cache must behave exactly like no cache, which is what makes the option
 /// safe to turn on without re-validating output.
 #[tokio::test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "decoder generation is orders of magnitude slower unoptimised; run with --release"
+)]
 async fn a_cold_cache_matches_no_cache() {
     let prompt = format!(
         "{}\nQ: What is the capital of Spain?\nA:",
@@ -115,6 +123,10 @@ async fn a_cold_cache_matches_no_cache() {
 
 /// A prompt that shares nothing with what the cache holds must not inherit it.
 #[tokio::test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "decoder generation is orders of magnitude slower unoptimised; run with --release"
+)]
 async fn a_diverging_prompt_does_not_inherit_the_cache() {
     let warmed = format!(
         "{}\nQ: What is the capital of France?\nA:",
@@ -151,6 +163,10 @@ async fn a_diverging_prompt_does_not_inherit_the_cache() {
 /// and three drop to roughly 210ms and 270ms. Answers are identical either way,
 /// which is the part that has to stay true.
 #[tokio::test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "decoder generation is orders of magnitude slower unoptimised; run with --release"
+)]
 async fn a_conversation_only_prefills_the_new_turn() {
     use kjarni::chat::Chat;
 

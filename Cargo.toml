@@ -73,6 +73,14 @@ libm = "0.2.0"
 
 memmap2 = "0.9.9"
 
+# Image decoding, behind the `image-io` feature. Both are pure Rust with no C
+# dependencies, which is the whole reason for picking them over `image`: the
+# promise of this engine is one binary and no toolchain, and a JPEG decoder that
+# drags in libjpeg would break it. Callers that already hold decoded pixels never
+# compile either of these.
+zune-jpeg = "0.4"
+png = "0.17"
+
 # Lint policy for the workspace. CI runs `cargo clippy --workspace --all-targets
 # -- -D warnings`, so anything not allowed here has to be fixed rather than ignored.
 # Each allow is a deliberate exemption with a reason, not a backlog.

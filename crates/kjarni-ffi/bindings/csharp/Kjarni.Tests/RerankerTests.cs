@@ -48,6 +48,9 @@ namespace Kjarni.Tests
             var score = _reranker.Score(query, document);
             _output.WriteLine($"\"{query}\" / \"{document}\": {score:F6}");
 
+            // Raw cross-encoder logits, which is what torch returns: both
+            // `transformers` and `sentence-transformers` give the unsquashed
+            // value, and the checkpoint declares Identity as its activation.
             Assert.Equal(expected, score, 2);
         }
 

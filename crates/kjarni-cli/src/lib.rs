@@ -425,6 +425,13 @@ pub enum Commands {
         action: IndexCommands,
     },
 
+    /// Index and search images by description
+    #[cfg(feature = "image-io")]
+    Image {
+        #[command(subcommand)]
+        action: ImageCommands,
+    },
+
     /// Search an index
     Search {
         /// Path to the index file
@@ -530,6 +537,47 @@ pub enum InspectCommands {
     Model {
         /// Path to the model file
         path: String,
+    },
+}
+
+/// Image search, backed by CLIP.
+///
+/// Separate from `index`/`search` because the vectors are not interchangeable:
+/// a CLIP image vector and a MiniLM text vector live in different spaces, and
+/// comparing them would return confident nonsense.
+#[cfg(feature = "image-io")]
+#[derive(Subcommand, Debug, PartialEq)]
+pub enum ImageCommands {
+    /// Embed images into a searchable index
+    Index {
+        /// Files or directories of images
+        #[arg(required = true)]
+        inputs: Vec<String>,
+
+        /// Where to write the index
+        #[arg(short, long, default_value = "images.json")]
+        output: String,
+
+        /// Suppress progress output
+        #[arg(short, long)]
+        quiet: bool,
+    },
+
+    /// Find images matching a description
+    Search {
+        /// Path to the image index
+        index_path: String,
+
+        /// What to look for, in words
+        query: String,
+
+        /// Number of results
+        #[arg(short = 'k', long, default_value_t = 5)]
+        top_k: usize,
+
+        /// Suppress progress output
+        #[arg(short, long)]
+        quiet: bool,
     },
 }
 

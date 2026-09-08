@@ -13,6 +13,9 @@ categories.workspace = true
 
 [dependencies]
 kjarni-transformers = { workspace = true }
+# Optional: only pulled in by the `image-io` feature below.
+zune-jpeg = { workspace = true, optional = true }
+png = { workspace = true, optional = true }
 kjarni-rag = { workspace = true }
 
 # Inherit from workspace
@@ -61,3 +64,17 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+
+# Decode JPEG and PNG from bytes. Without it the CLIP vision tower still works,
+# it just takes raw RGB from the caller, which is what an FFI or WASM host
+# usually already has. With it, `kjarni index` can walk a photo directory.
+image-io = ["dep:zune-jpeg", "dep:png"]
+
+# `harness = false`: this emits JSON for diffing against bench/torch_side.py, so
+# the test harness's own output would only get in the way.
+[[bench]]
+name = "torch_comparison"
+harness = false

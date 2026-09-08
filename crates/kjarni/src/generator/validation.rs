@@ -20,7 +20,10 @@ pub fn validate_for_generation(model_type: ModelType) -> GeneratorResult<()> {
         }
 
         // Encoders cannot generate text
-        ModelArchitecture::Bert | ModelArchitecture::NomicBert | ModelArchitecture::Mpnet => {
+        ModelArchitecture::Bert
+        | ModelArchitecture::NomicBert
+        | ModelArchitecture::Mpnet
+        | ModelArchitecture::Clip => {
             return Err(GeneratorError::InvalidModel(
                 cli_name.to_string(),
                 format!(

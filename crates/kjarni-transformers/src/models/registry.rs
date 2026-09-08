@@ -51,6 +51,14 @@ pub enum ModelArchitecture {
 
     /// Whisper family for speech-to-text.
     Whisper,
+
+    /// CLIP family: a ViT image tower and a text tower projected into one space.
+    ///
+    /// The image tower is an ordinary transformer encoder over patches, so it runs
+    /// the same block stack as BERT does over tokens. What differs is the front:
+    /// pixels become patches through one strided projection rather than ids
+    /// through an embedding table.
+    Clip,
 }
 
 impl ModelArchitecture {
@@ -61,6 +69,7 @@ impl ModelArchitecture {
             Self::Qwen2 => "Qwen2 (Biased)",
             Self::Mistral => "Mistral (SWA)",
             Self::Phi3 => "Phi-3 (LongRoPE)",
+            Self::Clip => "CLIP (ViT + text)",
             Self::Bert => "BERT",
             Self::Mpnet => "Mpnet",
             Self::NomicBert => "Nomic-BERT",
@@ -78,7 +87,7 @@ impl ModelArchitecture {
             Self::Llama | Self::Qwen2 | Self::Mistral | Self::Phi3 | Self::GPT => "decoder",
 
             // Encoders (Embeddings/Classifiers)
-            Self::Bert | Self::NomicBert | Self::Mpnet => "encoder",
+            Self::Bert | Self::NomicBert | Self::Mpnet | Self::Clip => "encoder",
 
             // Seq2Seq
             Self::T5 | Self::Bart | Self::Whisper => "encoder-decoder",
@@ -127,6 +136,12 @@ pub enum ModelTask {
 
     /// General text-to-text transformation.
     TextToText,
+
+    /// Image -> vector, in a space shared with text embeddings.
+    ///
+    /// Distinct from `Embedding` because the input is pixels: it needs image
+    /// preprocessing rather than tokenisation, and the two cannot be swapped.
+    ImageEmbedding,
 }
 
 /// The curated list of pretrained models supported by Kjarni.
@@ -163,6 +178,9 @@ pub enum ModelType {
     WhisperLargeV3,
     DistilGpt2,
     Gpt2,
+
+    // Vision
+    ClipVitBase32,
 }
 
 /// Download URLs for all required model files.
@@ -176,8 +194,9 @@ pub struct ModelPaths {
 
     /// URL to tokenizer configuration.
     ///
-    /// Always required. Contains vocabulary and tokenization rules.
-    pub tokenizer_url: &'static str,
+    /// `None` for models that take no text at all: a vision encoder embeds pixels,
+    /// so there is no vocabulary to fetch. Every text model has one.
+    pub tokenizer_url: Option<&'static str>,
 
     /// URL to model configuration.
     ///
@@ -186,6 +205,14 @@ pub struct ModelPaths {
 
     /// Optional URL to quantized GGUF file.
     pub gguf_url: Option<&'static str>,
+
+    /// Optional URL to `preprocessor_config.json`.
+    ///
+    /// Image models need it and text models do not. It carries the resize, crop,
+    /// mean and std the weights were trained against, and getting any of them
+    /// wrong produces embeddings that look plausible while quietly ranking badly,
+    /// so these are read rather than hardcoded per model.
+    pub preprocessor_url: Option<&'static str>,
 }
 
 /// Complete metadata for a pretrained model.
@@ -256,13 +283,13 @@ impl ModelType {
 
             // Edge LLMs
             Self::Qwen2_5_0_5B_Instruct => "qwen2.5-0.5b-instruct",
-            Self::Qwen2_5_1_5B_Instruct => "qwen2.5-1.5b",
+            Self::Qwen2_5_1_5B_Instruct => "qwen2.5-1.5b-instruct",
             Self::Llama3_2_1B_Instruct => "llama3.2-1b-instruct",
             Self::Llama3_2_3B_Instruct => "llama3.2-3b-instruct",
-            Self::Phi3_5_Mini_Instruct => "phi3.5-mini",
+            Self::Phi3_5_Mini_Instruct => "phi3.5-mini-instruct",
 
             // Workhorse LLMs
-            Self::Mistral7B_v0_3_Instruct => "mistral-7b",
+            Self::Mistral7B_v0_3_Instruct => "mistral-7b-instruct",
             Self::Llama3_1_8B_Instruct => "llama3.1-8b-instruct",
             Self::DeepSeek_R1_Distill_Llama_8B => "deepseek-r1-8b",
 
@@ -277,6 +304,9 @@ impl ModelType {
             // Legacy
             Self::DistilGpt2 => "distilgpt2",
             Self::Gpt2 => "gpt2",
+
+            // Vision
+            Self::ClipVitBase32 => "clip-vit-base-32",
         }
     }
 
@@ -294,6 +324,10 @@ impl ModelType {
 
             // Vector embedding
             ModelTask::Embedding => "Embedding",
+
+            // Same index, different input: these vectors share a space with text
+            // embeddings, so they are grouped apart only by what goes in.
+            ModelTask::ImageEmbedding => "Image Embedding",
 
             //  Reranking
             ModelTask::ReRanking => "Re-Ranker",
@@ -321,9 +355,12 @@ impl ModelType {
                 task: ModelTask::Embedding,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Fastest sentence embedding model. Ideal for basic RAG.",
                 size_mb: 90,
@@ -335,9 +372,12 @@ impl ModelType {
                 task: ModelTask::ReRanking,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Cross-encoder for passage reranking. Use for search result reordering, NOT sentiment.",
                 size_mb: 90,
@@ -349,9 +389,12 @@ impl ModelType {
                 task: ModelTask::Embedding,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "High-quality sentence embedding model.",
                 size_mb: 420,
@@ -363,9 +406,12 @@ impl ModelType {
                 task: ModelTask::Embedding,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/distilbert-base-cased-distilled-squad/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/distilbert-base-cased-distilled-squad/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/distilbert-base-cased-distilled-squad/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/distilbert-base-cased-distilled-squad/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Lightweight DistilBERT for question answering.",
                 size_mb: 260,
@@ -377,9 +423,12 @@ impl ModelType {
                 task: ModelTask::Embedding,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Modern standard for RAG. 8192 context length, matryoshka embeddings.",
                 size_mb: 550,
@@ -393,9 +442,12 @@ impl ModelType {
                     // safetensors URL on their repo 404s. This mirror carries the
                     // converted weights and the same tokenizer and config.
                     weights_url: "https://huggingface.co/olafuraron/bge-m3-safetensors/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/bge-m3-safetensors/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/bge-m3-safetensors/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/bge-m3-safetensors/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Massive multilingual embedding model. State of the art for diverse languages.",
                 size_mb: 2200,
@@ -406,9 +458,12 @@ impl ModelType {
                 task: ModelTask::SentimentAnalysis,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/distilbert/distilbert-base-uncased-finetuned-sst-2-english/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/distilbert/distilbert-base-uncased-finetuned-sst-2-english/resolve/main/onnx/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/distilbert/distilbert-base-uncased-finetuned-sst-2-english/resolve/main/onnx/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/distilbert/distilbert-base-uncased-finetuned-sst-2-english/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Fast binary sentiment (positive/negative). Best for simple yes/no sentiment.",
                 size_mb: 268,
@@ -419,9 +474,12 @@ impl ModelType {
                 task: ModelTask::SentimentAnalysis,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/olafuraron/twitter-roberta-base-sentiment-latest-safetensors/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/twitter-roberta-base-sentiment-latest-safetensors/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/twitter-roberta-base-sentiment-latest-safetensors/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/twitter-roberta-base-sentiment-latest-safetensors/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "3-class sentiment (negative/neutral/positive). Optimized for social media text.",
                 size_mb: 499,
@@ -432,9 +490,12 @@ impl ModelType {
                 task: ModelTask::SentimentAnalysis,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/olafuraron/bert-base-multilingual-uncased-sentiment-safetensors/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/bert-base-multilingual-uncased-sentiment-safetensors/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/bert-base-multilingual-uncased-sentiment-safetensors/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/bert-base-multilingual-uncased-sentiment-safetensors/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "5-star sentiment (1-5). Multilingual: EN, DE, FR, ES, IT, NL.",
                 size_mb: 681,
@@ -445,9 +506,12 @@ impl ModelType {
                 task: ModelTask::Classification,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/SamLowe/roberta-base-go_emotions/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/SamLowe/roberta-base-go_emotions/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/SamLowe/roberta-base-go_emotions/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/SamLowe/roberta-base-go_emotions/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "28 emotion labels (multi-label). Detects nuanced emotions like admiration, amusement, anger, etc.",
                 size_mb: 499,
@@ -458,9 +522,12 @@ impl ModelType {
                 task: ModelTask::Classification,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/olafuraron/emotion-english-distilroberta-base-safetensors/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/emotion-english-distilroberta-base-safetensors/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/emotion-english-distilroberta-base-safetensors/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/emotion-english-distilroberta-base-safetensors/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "7 emotions: anger, disgust, fear, joy, neutral, sadness, surprise.",
                 size_mb: 329,
@@ -471,9 +538,12 @@ impl ModelType {
                 task: ModelTask::Classification,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/olafuraron/toxic-bert-safetensors/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/toxic-bert-safetensors/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/toxic-bert-safetensors/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/toxic-bert-safetensors/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Toxic comment classifier. Detects: toxic, severe_toxic, obscene, threat, insult, identity_hate.",
                 size_mb: 438,
@@ -484,11 +554,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "Tiny logic engine. Perfect for structured output and sanity checks.",
                 size_mb: 990,
@@ -499,11 +572,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "Balanced edge model. Good reasoning in a small package.",
                 size_mb: 3100,
@@ -514,11 +590,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "Official Meta edge model. Very fast, good general chat.",
                 size_mb: 2500,
@@ -529,11 +608,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct/resolve/main/model.safetensors.index.json",
-                    tokenizer_url: "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "The 3B standard. Excellent balance of speed and coherence.",
                 size_mb: 6500,
@@ -544,11 +626,14 @@ impl ModelType {
                 task: ModelTask::Reasoning,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/microsoft/Phi-3.5-mini-instruct/resolve/main/model.safetensors.index.json",
-                    tokenizer_url: "https://huggingface.co/microsoft/Phi-3.5-mini-instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/microsoft/Phi-3.5-mini-instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/microsoft/Phi-3.5-mini-instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "Microsoft's 3.8B reasoning champion. Punches way above its weight.",
                 size_mb: 7500,
@@ -559,11 +644,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/model.safetensors.index.json",
-                    tokenizer_url: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "Mistral v0.3. Extremely reliable 7B model for all tasks.",
                 size_mb: 14500,
@@ -574,11 +662,14 @@ impl ModelType {
                 task: ModelTask::Chat,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/model.safetensors.index.json",
-                    tokenizer_url: "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "The open source standard. Robust, smart, and safe.",
                 size_mb: 16000,
@@ -589,11 +680,14 @@ impl ModelType {
                 task: ModelTask::Reasoning,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/model.safetensors.index.json",
-                    tokenizer_url: "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/resolve/main/config.json",
                     gguf_url: Some(
                         "https://huggingface.co/unsloth/DeepSeek-R1-Distill-Llama-8B-GGUF/resolve/main/DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf",
                     ),
+                    preprocessor_url: None,
                 },
                 description: "State-of-the-Art reasoning distilled from DeepSeek R1.",
                 size_mb: 16000,
@@ -604,9 +698,12 @@ impl ModelType {
                 task: ModelTask::Seq2Seq,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/google/flan-t5-base/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/google/flan-t5-base/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/google/flan-t5-base/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/google/flan-t5-base/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "General purpose instruction follower (Text-to-Text).",
                 size_mb: 990,
@@ -617,9 +714,12 @@ impl ModelType {
                 task: ModelTask::Seq2Seq,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/google/flan-t5-large/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/google/flan-t5-large/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/google/flan-t5-large/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/google/flan-t5-large/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Powerful instruction follower. Great for translation and summarization.",
                 size_mb: 3000,
@@ -631,9 +731,12 @@ impl ModelType {
                 task: ModelTask::Seq2Seq,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/facebook/bart-large-cnn/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/facebook/bart-large-cnn/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/facebook/bart-large-cnn/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/facebook/bart-large-cnn/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "BART large fine-tuned for summarization.",
                 size_mb: 1600,
@@ -645,9 +748,12 @@ impl ModelType {
                 task: ModelTask::Seq2Seq,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/olafuraron/distilbart-cnn-12-6/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/olafuraron/distilbart-cnn-12-6/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/olafuraron/distilbart-cnn-12-6/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/olafuraron/distilbart-cnn-12-6/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Distilled BART for fast summarization.",
                 size_mb: 1000,
@@ -659,9 +765,12 @@ impl ModelType {
                 task: ModelTask::SpeechToText,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/openai/whisper-small/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/openai/whisper-small/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/openai/whisper-small/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/openai/whisper-small/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "OpenAI Whisper small for speech-to-text transcription.",
                 size_mb: 1500,
@@ -673,9 +782,12 @@ impl ModelType {
                 task: ModelTask::SpeechToText,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/openai/whisper-large-v3/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/openai/whisper-large-v3/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/openai/whisper-large-v3/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/openai/whisper-large-v3/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "OpenAI Whisper large v3 for high-accuracy speech-to-text transcription.",
                 size_mb: 7700,
@@ -687,9 +799,12 @@ impl ModelType {
                 task: ModelTask::Generation,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/distilgpt2/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/distilgpt2/resolve/main/tokenizer.json",
+                    tokenizer_url: Some(
+                        "https://huggingface.co/distilgpt2/resolve/main/tokenizer.json",
+                    ),
                     config_url: "https://huggingface.co/distilgpt2/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "Distilled GPT-2 for lightweight text generation.",
                 size_mb: 319,
@@ -701,13 +816,44 @@ impl ModelType {
                 task: ModelTask::Generation,
                 paths: ModelPaths {
                     weights_url: "https://huggingface.co/gpt2/resolve/main/model.safetensors",
-                    tokenizer_url: "https://huggingface.co/gpt2/resolve/main/tokenizer.json",
+                    tokenizer_url: Some("https://huggingface.co/gpt2/resolve/main/tokenizer.json"),
                     config_url: "https://huggingface.co/gpt2/resolve/main/config.json",
                     gguf_url: None,
+                    preprocessor_url: None,
                 },
                 description: "GPT-2 small: general-purpose text generator.",
                 size_mb: 548,
                 params_millions: 117,
+            },
+
+            // LAION's B/32 rather than `openai/clip-vit-base-patch32`, which ships
+            // only `pytorch_model.bin` and no safetensors at all: the loader here
+            // cannot read a pickle. Same architecture and size, trained on LAION-2B,
+            // and it uses plain GELU where OpenAI's needs QuickGELU, so it runs on
+            // the activations this engine already has.
+            //
+            // 32x32 patches over a 224px image is 49 patches plus one CLS: 50
+            // positions, so the image tower is cheaper than a short sentence
+            // through a text encoder.
+            Self::ClipVitBase32 => ModelInfo {
+                architecture: ModelArchitecture::Clip,
+                task: ModelTask::ImageEmbedding,
+                paths: ModelPaths {
+                    weights_url: "https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K/resolve/main/model.safetensors",
+                    // Present because CLIP has a text tower too: the whole point is
+                    // that a caption and a photo land in the same 512-d space.
+                    tokenizer_url: Some(
+                        "https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K/resolve/main/tokenizer.json",
+                    ),
+                    config_url: "https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K/resolve/main/config.json",
+                    gguf_url: None,
+                    preprocessor_url: Some(
+                        "https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K/resolve/main/preprocessor_config.json",
+                    ),
+                },
+                description: "CLIP ViT-B/32: images and text in one embedding space. Search photos by description.",
+                size_mb: 605,
+                params_millions: 151,
             },
         }
     }
@@ -790,6 +936,12 @@ impl ModelType {
             "distilgpt2" | "distilgpt2/resolve/main/model.safetensors" => Some(Self::DistilGpt2),
             "gpt2" | "gpt2/resolve/main/model.safetensors" => Some(Self::Gpt2),
 
+            // Former CLI names, kept resolving so existing scripts do not break.
+            // These three lacked the `-instruct` suffix their variants have.
+            "qwen2.5-1.5b" => Some(Self::Qwen2_5_1_5B_Instruct),
+            "phi3.5-mini" => Some(Self::Phi3_5_Mini_Instruct),
+            "mistral-7b" => Some(Self::Mistral7B_v0_3_Instruct),
+
             _ => None,
         }
     }
@@ -871,9 +1023,19 @@ pub async fn download_model_files(
 ) -> Result<PathBuf> {
     tokio::fs::create_dir_all(model_dir).await?;
 
-    download_file(model_dir, "tokenizer.json", paths.tokenizer_url, quiet).await?;
+    // A vision encoder has no vocabulary, so this is absent rather than empty.
+    if let Some(url) = paths.tokenizer_url {
+        download_file(model_dir, "tokenizer.json", url, quiet).await?;
+    }
     download_file(model_dir, "config.json", paths.config_url, quiet).await?;
     download_sentence_bert_config(model_dir, paths.config_url).await;
+
+    // Image models carry their resize, crop, mean and std here. Fetched eagerly
+    // because the loader cannot guess them and a wrong guess degrades retrieval
+    // silently rather than failing.
+    if let Some(url) = paths.preprocessor_url {
+        download_file(model_dir, "preprocessor_config.json", url, quiet).await?;
+    }
 
     let use_gguf = matches!(format, WeightsFormat::GGUF) && paths.gguf_url.is_some();
 
@@ -906,15 +1068,63 @@ pub async fn download_model_files(
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code, reason = "reachable only on some targets")]
 async fn download_sentence_bert_config(model_dir: &Path, config_url: &str) {
+    sentence_bert_config_with(model_dir, config_url, |url| async move {
+        download_file(model_dir, SENTENCE_BERT_CONFIG, &url, true).await
+    })
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const SENTENCE_BERT_CONFIG: &str = "sentence_bert_config.json";
+
+/// Marks a model directory as known not to have `sentence_bert_config.json`.
+///
+/// Hidden so it does not look like part of the model, and named after the file it
+/// speaks for rather than being a generic "negative cache", because it only ever
+/// covers this one optional file.
+#[cfg(not(target_arch = "wasm32"))]
+const SENTENCE_BERT_ABSENT_MARKER: &str = ".sentence_bert_config.absent";
+
+/// The decision half of fetching the optional config, with the fetch injected.
+///
+/// Split out so the three behaviours that matter can be tested without a network:
+/// that a recorded absence stops the request happening at all, that only a
+/// definitive answer is recorded, and that a transient failure records nothing.
+///
+/// `load_from_registry` calls into here on every load, not only when the model is
+/// missing, and `download_file` short-circuits on files that exist. An optional
+/// file that legitimately does not exist therefore had nothing to short-circuit
+/// on and was re-requested every time, at a cost of twenty seconds of retry
+/// backoff per load. The marker is what turns that into a one-off.
+#[cfg(not(target_arch = "wasm32"))]
+async fn sentence_bert_config_with<F, Fut>(model_dir: &Path, config_url: &str, fetch: F)
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let Some(base) = config_url.strip_suffix("config.json") else {
         return;
     };
-    let url = format!("{base}sentence_bert_config.json");
 
-    // Deliberately ignoring the result: absence is expected, and a network blip
-    // here must not fail a download whose required files already succeeded.
-    if let Err(e) = download_file(model_dir, "sentence_bert_config.json", &url, true).await {
-        log::debug!("no sentence_bert_config.json for this model ({e})");
+    let marker = model_dir.join(SENTENCE_BERT_ABSENT_MARKER);
+    if marker.exists() {
+        return;
+    }
+
+    // Deliberately not fatal: absence is the normal case for anything that is not
+    // a sentence-transformers export, and a network blip here must not fail a
+    // download whose required files already succeeded.
+    match fetch(format!("{base}{SENTENCE_BERT_CONFIG}")).await {
+        Ok(()) => {}
+        Err(e) if is_permanent(&e) => {
+            log::debug!("no {SENTENCE_BERT_CONFIG} for this model ({e})");
+            // Only a definitive answer is recorded. A timeout, a 5xx, a 429 or a
+            // dropped connection leaves no marker, so a model that does have the
+            // file still picks it up on a later load rather than being written off
+            // because the CDN had a bad minute.
+            let _ = tokio::fs::write(&marker, b"the server returned 4xx for this file\n").await;
+        }
+        Err(e) => log::debug!("could not fetch {SENTENCE_BERT_CONFIG} ({e})"),
     }
 }
 
@@ -925,8 +1135,66 @@ async fn download_sentence_bert_config(model_dir: &Path, config_url: &str) {
 )]
 async fn download_sentence_bert_config(_model_dir: &Path, _config_url: &str) {}
 
+/// A download that failed with a status the server will keep returning.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct PermanentIfClientError {
+    filename: String,
+    status: reqwest::StatusCode,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for PermanentIfClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Failed to download {}: HTTP {}",
+            self.filename, self.status
+        )
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::error::Error for PermanentIfClientError {}
+
+/// Whether re-sending the same request could ever give a different answer.
+///
+/// Most 4xx says the request itself is wrong: the file is not there, or we may
+/// not have it. 5xx and transport errors are worth retrying, which is what the
+/// backoff was written for.
+///
+/// Two 4xx codes are the exception and they matter more than the rule. 429 is
+/// rate limiting and 408 is a server-side timeout: both mean "ask again later",
+/// and both come back from a busy CDN under exactly the conditions a retry loop
+/// exists for. Treating them as final would abandon a download that was about to
+/// succeed, and for an optional file it would write the "absent" marker for one
+/// the server actually has, making a transient hiccup permanent.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_permanent(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<PermanentIfClientError>().is_some_and(|p| {
+        p.status.is_client_error()
+            && p.status != reqwest::StatusCode::TOO_MANY_REQUESTS
+            && p.status != reqwest::StatusCode::REQUEST_TIMEOUT
+    })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 async fn download_file(model_dir: &Path, filename: &str, url: &str, quiet: bool) -> Result<()> {
+    download_file_with(model_dir, filename, url, quiet, &RETRY).await
+}
+
+/// As `download_file`, with the retry schedule supplied.
+///
+/// Only tests pass anything but [`RETRY`]; the parameter exists so the loop can be
+/// exercised without waiting out twenty seconds of real backoff.
+#[cfg(not(target_arch = "wasm32"))]
+async fn download_file_with(
+    model_dir: &Path,
+    filename: &str,
+    url: &str,
+    quiet: bool,
+    retry: &RetryPolicy,
+) -> Result<()> {
     let local_path = model_dir.join(filename);
     if local_path.exists() {
         return Ok(());
@@ -947,17 +1215,31 @@ async fn download_file(model_dir: &Path, filename: &str, url: &str, quiet: bool)
     // Multi-gigabyte shards over a CDN drop mid-transfer often enough that a
     // single attempt is not a download strategy: this one died at 38% of 4.9GB.
     // Each retry resumes from what is already on disk instead of starting over.
-    let client = reqwest::Client::new();
-    const MAX_ATTEMPTS: u32 = 5;
+    // Timeouts, because the default is none: a connection that stalls rather than
+    // drops would hang here forever, and the retry loop would never run. No total
+    // timeout, since a legitimate multi-gigabyte shard can take many minutes; the
+    // read timeout is what distinguishes slow from dead.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
-    for attempt in 1..=MAX_ATTEMPTS {
+    for attempt in 1..=retry.attempts {
         match download_to_part(&client, url, filename, &part_path, quiet).await {
             Ok(()) => break,
-            Err(e) if attempt < MAX_ATTEMPTS => {
+            // A 4xx is the server's final answer. Retrying it cannot change the
+            // outcome and costs 20 seconds of backoff to learn nothing: a missing
+            // optional file used to spend exactly that on every single load.
+            Err(e) if is_permanent(&e) => return Err(e),
+            Err(e) if attempt < retry.attempts => {
                 if !quiet {
-                    eprintln!("    {filename} interrupted ({e}); retry {attempt}/{MAX_ATTEMPTS}");
+                    eprintln!(
+                        "    {filename} interrupted ({e}); retry {attempt}/{}",
+                        retry.attempts
+                    );
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+                tokio::time::sleep(retry.backoff(attempt)).await;
             }
             Err(e) => return Err(e),
         }
@@ -966,6 +1248,37 @@ async fn download_file(model_dir: &Path, filename: &str, url: &str, quiet: bool)
     tokio::fs::rename(&part_path, &local_path).await?;
     Ok(())
 }
+
+/// How hard to retry a download, and how long to wait between attempts.
+///
+/// A policy rather than two constants inline, because the schedule is the
+/// expensive part: five attempts at 2, 4, 6 and 8 seconds is twenty seconds spent
+/// before giving up, which is what made a single missing optional file cost
+/// twenty seconds on every model load. Naming it also lets a test drive the loop
+/// in milliseconds instead of waiting out the real backoff.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy)]
+struct RetryPolicy {
+    attempts: u32,
+    /// Multiplied by the attempt number, so waits grow linearly.
+    step: std::time::Duration,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RetryPolicy {
+    fn backoff(&self, attempt: u32) -> std::time::Duration {
+        self.step * attempt
+    }
+}
+
+/// Multi-gigabyte shards over a CDN drop mid-transfer often enough that a single
+/// attempt is not a download strategy: one died at 38% of 4.9GB. Each retry
+/// resumes from what is already on disk rather than starting over.
+#[cfg(not(target_arch = "wasm32"))]
+static RETRY: RetryPolicy = RetryPolicy {
+    attempts: 5,
+    step: std::time::Duration::from_secs(2),
+};
 
 /// Fetches `url` into `part_path`, continuing from whatever is already there.
 #[cfg(not(target_arch = "wasm32"))]
@@ -994,11 +1307,11 @@ async fn download_to_part(
 
     let response = req.send().await?;
     if !response.status().is_success() {
-        return Err(anyhow!(
-            "Failed to download {}: HTTP {}",
-            filename,
-            response.status()
-        ));
+        let status = response.status();
+        return Err(anyhow!(PermanentIfClientError {
+            filename: filename.to_string(),
+            status,
+        }));
     }
 
     // A server that ignores Range replies 200 with the whole file, so what is on
@@ -1148,4 +1461,477 @@ pub fn model_cache_dir(model_dir: &str) -> PathBuf {
         .join(".cache")
         .join("kjarni")
         .join(model_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole of the download fix. A 4xx is the server's final answer, so
+    /// retrying it cannot change the outcome and costs 20 seconds of backoff to
+    /// learn nothing: a missing optional file used to spend exactly that on every
+    /// single load. A 5xx or a dropped connection is worth retrying, which is what
+    /// the backoff was written for, so misclassifying either way is expensive.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn only_client_errors_are_treated_as_permanent() {
+        let permanent = [
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::GONE,
+        ];
+        for status in permanent {
+            let e = anyhow!(PermanentIfClientError {
+                filename: "sentence_bert_config.json".to_string(),
+                status,
+            });
+            assert!(is_permanent(&e), "{status} should not be retried");
+        }
+
+        // Retryable: the server is having a bad minute, not answering definitively.
+        let transient = [
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            reqwest::StatusCode::BAD_GATEWAY,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            reqwest::StatusCode::GATEWAY_TIMEOUT,
+            // These two are 4xx but mean "ask again later", not "no". Marking
+            // either permanent would abandon a download that was about to
+            // succeed, and would write an "absent" marker for a file that exists.
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+        ];
+        for status in transient {
+            let e = anyhow!(PermanentIfClientError {
+                filename: "model.safetensors".to_string(),
+                status,
+            });
+            assert!(!is_permanent(&e), "{status} should still be retried");
+        }
+    }
+
+    /// A transport failure carries no status at all and must not be mistaken for a
+    /// definitive answer, or a flaky connection would permanently mark a file
+    /// absent that the server has.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn errors_without_a_status_are_retryable() {
+        let e = anyhow!("connection reset by peer");
+        assert!(!is_permanent(&e));
+        let e = anyhow!(std::io::Error::other("timed out"));
+        assert!(!is_permanent(&e));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_permanent_error_names_the_file_and_status() {
+        let e = PermanentIfClientError {
+            filename: "sentence_bert_config.json".to_string(),
+            status: reqwest::StatusCode::NOT_FOUND,
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("sentence_bert_config.json"), "{msg}");
+        assert!(msg.contains("404"), "{msg}");
+    }
+
+    /// Renaming these was a deliberate consistency fix, and the aliases are what
+    /// keeps every script, blog post and README that used the old names working.
+    /// Dropping one is a silent break for anyone who wrote it down.
+    #[test]
+    fn former_cli_names_still_resolve() {
+        for (old, expected) in [
+            ("qwen2.5-1.5b", ModelType::Qwen2_5_1_5B_Instruct),
+            ("phi3.5-mini", ModelType::Phi3_5_Mini_Instruct),
+            ("mistral-7b", ModelType::Mistral7B_v0_3_Instruct),
+        ] {
+            assert_eq!(
+                ModelType::from_cli_name(old),
+                Some(expected),
+                "the former name {old} must keep resolving"
+            );
+        }
+    }
+
+    /// Every `_Instruct` variant should say so in its CLI name. Three did not,
+    /// which is what the rename fixed; this stops the next one drifting.
+    #[test]
+    fn instruct_variants_are_named_consistently() {
+        for m in ModelType::all() {
+            let variant = format!("{m:?}");
+            if variant.ends_with("_Instruct") {
+                assert!(
+                    m.cli_name().contains("instruct"),
+                    "{variant} is an instruct model but its CLI name is {}",
+                    m.cli_name()
+                );
+            }
+        }
+    }
+
+    /// A name that resolves to nothing is a model nobody can load.
+    #[test]
+    fn every_cli_name_round_trips() {
+        for m in ModelType::all() {
+            assert_eq!(
+                ModelType::from_cli_name(m.cli_name()),
+                Some(m),
+                "{} does not resolve back to itself",
+                m.cli_name()
+            );
+        }
+    }
+
+    /// CLI names are how a user addresses a model; two models sharing one means
+    /// whichever `ModelType::iter()` yields first wins, silently.
+    #[test]
+    fn cli_names_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for m in ModelType::all() {
+            assert!(
+                seen.insert(m.cli_name()),
+                "duplicate CLI name: {}",
+                m.cli_name()
+            );
+        }
+    }
+
+    /// Text models need a vocabulary; a vision tower does not, which is why
+    /// `tokenizer_url` became optional. Anything that is not an image model
+    /// dropping its tokenizer would fail much later, at load.
+    #[test]
+    fn only_image_models_may_omit_a_tokenizer() {
+        for m in ModelType::all() {
+            let info = m.info();
+            if info.paths.tokenizer_url.is_none() {
+                assert_eq!(
+                    info.task,
+                    ModelTask::ImageEmbedding,
+                    "{} has no tokenizer but is not an image model",
+                    m.cli_name()
+                );
+            }
+        }
+    }
+
+    /// The preprocessor carries resize, crop, mean and std. An image model without
+    /// it would fall back to hardcoded defaults, which is the silent-wrongness
+    /// this field exists to prevent.
+    #[test]
+    fn image_models_carry_a_preprocessor_config() {
+        for m in ModelType::all() {
+            let info = m.info();
+            if info.task == ModelTask::ImageEmbedding {
+                assert!(
+                    info.paths.preprocessor_url.is_some(),
+                    "{} is an image model with no preprocessor_config.json",
+                    m.cli_name()
+                );
+            }
+        }
+    }
+
+    /// Every registry entry needs somewhere to download from.
+    #[test]
+    fn every_model_has_weights_and_a_config() {
+        for m in ModelType::all() {
+            let info = m.info();
+            let name = m.cli_name();
+            assert!(
+                !info.paths.weights_url.is_empty(),
+                "{name} has no weights URL"
+            );
+            assert!(
+                !info.paths.config_url.is_empty(),
+                "{name} has no config URL"
+            );
+            assert!(
+                info.paths.config_url.ends_with("config.json"),
+                "{name}: the sentence_bert_config URL is derived by stripping \
+                 'config.json' from this, so it has to end with it"
+            );
+        }
+    }
+
+    // ── the optional-config marker ───────────────────────────────────────
+    //
+    // The fetch is injected, so these assert on what the decision does rather than
+    // on a network. The two that matter most are negative: that a recorded absence
+    // stops the request happening at all, and that a transient failure records
+    // nothing.
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod marker {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const CONFIG_URL: &str = "https://example.invalid/model/config.json";
+
+        fn err(status: reqwest::StatusCode) -> anyhow::Error {
+            anyhow!(PermanentIfClientError {
+                filename: SENTENCE_BERT_CONFIG.to_string(),
+                status,
+            })
+        }
+
+        /// The performance fix itself: once absence is recorded, no request is
+        /// made. Asserting the call count is the only way to state this, since the
+        /// function returns nothing either way.
+        #[tokio::test]
+        async fn a_recorded_absence_stops_the_request_happening() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(SENTENCE_BERT_ABSENT_MARKER), b"x").unwrap();
+
+            let calls = AtomicUsize::new(0);
+            sentence_bert_config_with(dir.path(), CONFIG_URL, |_url| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            })
+            .await;
+
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "a model already known to lack the file must not be asked again"
+            );
+        }
+
+        /// A definitive 404 is recorded, so the next load short-circuits.
+        #[tokio::test]
+        async fn a_404_is_recorded_so_it_is_asked_only_once() {
+            let dir = tempfile::tempdir().unwrap();
+            sentence_bert_config_with(dir.path(), CONFIG_URL, |_url| async {
+                Err(err(reqwest::StatusCode::NOT_FOUND))
+            })
+            .await;
+
+            assert!(
+                dir.path().join(SENTENCE_BERT_ABSENT_MARKER).exists(),
+                "a 404 is final and should be remembered"
+            );
+        }
+
+        /// The asymmetry, and the one most expensive to get wrong: a server having
+        /// a bad minute must not permanently mark a file absent that it has.
+        #[tokio::test]
+        async fn a_transient_failure_records_nothing() {
+            for status in [
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                reqwest::StatusCode::REQUEST_TIMEOUT,
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                sentence_bert_config_with(dir.path(), CONFIG_URL, |_url| async move {
+                    Err(err(status))
+                })
+                .await;
+
+                assert!(
+                    !dir.path().join(SENTENCE_BERT_ABSENT_MARKER).exists(),
+                    "{status} is not a final answer and must not be recorded"
+                );
+            }
+        }
+
+        /// A transport error carries no status at all and is likewise not final.
+        #[tokio::test]
+        async fn a_dropped_connection_records_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            sentence_bert_config_with(dir.path(), CONFIG_URL, |_url| async {
+                Err(anyhow!("connection reset by peer"))
+            })
+            .await;
+            assert!(!dir.path().join(SENTENCE_BERT_ABSENT_MARKER).exists());
+        }
+
+        /// A model that has the file leaves no marker, or it would stop being
+        /// refreshed if it were ever deleted.
+        #[tokio::test]
+        async fn a_successful_fetch_records_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            sentence_bert_config_with(dir.path(), CONFIG_URL, |_url| async { Ok(()) }).await;
+            assert!(!dir.path().join(SENTENCE_BERT_ABSENT_MARKER).exists());
+        }
+
+        /// The URL is derived by stripping `config.json`, so an entry whose config
+        /// URL is shaped differently must be skipped rather than fetched from a
+        /// nonsense address.
+        #[tokio::test]
+        async fn an_unexpected_config_url_is_left_alone() {
+            let dir = tempfile::tempdir().unwrap();
+            let calls = AtomicUsize::new(0);
+            sentence_bert_config_with(dir.path(), "https://example.invalid/cfg.yaml", |_u| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            })
+            .await;
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+
+        /// The URL actually requested sits beside the config it was derived from.
+        #[tokio::test]
+        async fn the_fetch_url_sits_beside_the_config() {
+            let dir = tempfile::tempdir().unwrap();
+            let seen = std::sync::Mutex::new(String::new());
+            sentence_bert_config_with(dir.path(), CONFIG_URL, |url| {
+                *seen.lock().unwrap() = url;
+                async { Ok(()) }
+            })
+            .await;
+            assert_eq!(
+                seen.into_inner().unwrap(),
+                "https://example.invalid/model/sentence_bert_config.json"
+            );
+        }
+    }
+
+    // ── the retry loop ───────────────────────────────────────────────────
+    //
+    // Against a real socket, because this is about what `download_file` does with
+    // reqwest rather than about a decision function. What is asserted is the
+    // request count: the 21-second bug was a 404 being asked five times, and only
+    // counting requests can state that it is now asked once.
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod retry {
+        use super::*;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        /// A server that answers everything with `status` and counts requests.
+        ///
+        /// Returns the port and the counter. Deliberately not a real HTTP stack:
+        /// it writes a fixed response and closes, which is all the client needs to
+        /// classify the answer.
+        async fn counting_server(status: &'static str) -> (u16, Arc<AtomicUsize>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let hits = Arc::new(AtomicUsize::new(0));
+
+            let counter = hits.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut sock, _)) = listener.accept().await else {
+                        return;
+                    };
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let body = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = sock.write_all(body.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                }
+            });
+            (port, hits)
+        }
+
+        /// Milliseconds rather than the real 2/4/6/8 second schedule, so a test
+        /// that exercises every attempt still finishes instantly.
+        const FAST: RetryPolicy = RetryPolicy {
+            attempts: 5,
+            step: std::time::Duration::from_millis(1),
+        };
+
+        async fn fetch(status: &'static str, retry: &RetryPolicy) -> (usize, bool) {
+            let (port, hits) = counting_server(status).await;
+            let dir = tempfile::tempdir().unwrap();
+            let url = format!("http://127.0.0.1:{port}/sentence_bert_config.json");
+            let ok = download_file_with(dir.path(), "f.json", &url, true, retry)
+                .await
+                .is_ok();
+            (hits.load(Ordering::SeqCst), ok)
+        }
+
+        /// The bug. A 404 was retried five times with 2+4+6+8 seconds of backoff,
+        /// which is where the twenty seconds went. It must be asked exactly once.
+        #[tokio::test]
+        async fn a_404_is_requested_exactly_once() {
+            let (hits, ok) = fetch("404 Not Found", &FAST).await;
+            assert_eq!(hits, 1, "a 404 is final and must not be retried");
+            assert!(!ok, "the call still fails, it just fails immediately");
+        }
+
+        #[tokio::test]
+        async fn other_client_errors_are_also_asked_once() {
+            for status in ["403 Forbidden", "401 Unauthorized", "410 Gone"] {
+                let (hits, _) = fetch(status, &FAST).await;
+                assert_eq!(hits, 1, "{status} should not be retried");
+            }
+        }
+
+        /// The other half: a server error is worth asking again, and the loop must
+        /// still use its whole budget.
+        #[tokio::test]
+        async fn a_500_uses_every_attempt() {
+            let (hits, ok) = fetch("500 Internal Server Error", &FAST).await;
+            assert_eq!(hits, FAST.attempts as usize, "a 5xx should be retried");
+            assert!(!ok);
+        }
+
+        /// Rate limiting is a 4xx that means "later", not "no". This is the case
+        /// that was wrong when the fix first landed: treating it as final would
+        /// abandon a download that was about to succeed.
+        #[tokio::test]
+        async fn rate_limiting_is_retried_despite_being_a_4xx() {
+            let (hits, _) = fetch("429 Too Many Requests", &FAST).await;
+            assert_eq!(hits, FAST.attempts as usize, "429 must keep retrying");
+
+            let (hits, _) = fetch("408 Request Timeout", &FAST).await;
+            assert_eq!(hits, FAST.attempts as usize, "408 must keep retrying");
+        }
+
+        /// An already-present file short-circuits before any socket is opened,
+        /// which is what keeps a warm cache from touching the network at all.
+        #[tokio::test]
+        async fn an_existing_file_is_never_requested() {
+            let (port, hits) = counting_server("404 Not Found").await;
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("f.json"), b"{}").unwrap();
+
+            let url = format!("http://127.0.0.1:{port}/f.json");
+            let ok = download_file_with(dir.path(), "f.json", &url, true, &FAST)
+                .await
+                .is_ok();
+
+            assert!(ok);
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                0,
+                "a cached file needs no request"
+            );
+        }
+
+        /// The schedule itself, since it is now a value rather than a literal.
+        #[test]
+        fn backoff_grows_with_each_attempt() {
+            assert_eq!(RETRY.backoff(1), std::time::Duration::from_secs(2));
+            assert_eq!(RETRY.backoff(4), std::time::Duration::from_secs(8));
+            // 2+4+6+8: the twenty seconds a missing optional file used to cost on
+            // every single load.
+            let total: std::time::Duration = (1..RETRY.attempts).map(|a| RETRY.backoff(a)).sum();
+            assert_eq!(total, std::time::Duration::from_secs(20));
+        }
+    }
+
+    /// CLIP specifically, since it is the first image model and the first entry to
+    /// use the two new `ModelPaths` fields.
+    #[test]
+    fn the_clip_entry_is_complete() {
+        let info = ModelType::ClipVitBase32.info();
+        assert_eq!(info.architecture, ModelArchitecture::Clip);
+        assert_eq!(info.task, ModelTask::ImageEmbedding);
+        assert!(info.paths.preprocessor_url.is_some());
+        assert!(
+            info.paths.tokenizer_url.is_some(),
+            "CLIP has a text tower, so it does need a vocabulary"
+        );
+        assert!(
+            info.paths.weights_url.ends_with(".safetensors"),
+            "the loader cannot read a pickle; openai/clip-vit-base-patch32 ships \
+             only pytorch_model.bin, which is why this points at LAION's export"
+        );
+        assert_eq!(ModelType::ClipVitBase32.cli_name(), "clip-vit-base-32");
+    }
 }

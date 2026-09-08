@@ -127,5 +127,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         output[idx] = silu(sum);
     } else if (COMPUTE_ACT_TYPE == 4u) {
         output[idx] = tanh(sum);
+    } else if (COMPUTE_ACT_TYPE == 5u) {
+        // QuickGELU: x * sigmoid(1.702x), what CLIP was trained with.
+        output[idx] = sum / (1.0 + exp(-1.702 * sum));
     }
 }

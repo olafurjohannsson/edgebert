@@ -64,7 +64,8 @@ impl Seq2SeqLoader {
 
         let generation_config = HFGenerationConfig::load_or_default(&model_dir);
 
-        download_model_files(&model_dir, &info.paths, WeightsFormat::SafeTensors, true).await?;
+        let quiet = load_config.as_ref().is_some_and(|c| c.quiet);
+        download_model_files(&model_dir, &info.paths, WeightsFormat::SafeTensors, quiet).await?;
 
         let context = if device.is_gpu() && context.is_none() {
             Some(WgpuContext::new().await?)
