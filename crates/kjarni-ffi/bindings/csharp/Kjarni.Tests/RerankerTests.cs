@@ -22,36 +22,36 @@ namespace Kjarni.Tests
         [InlineData(
             "What is machine learning?",
             "Machine learning is a subset of artificial intelligence that enables systems to learn from data.",
-            0.999984f)]
+            11.063f)]
         [InlineData(
             "What is machine learning?",
             "The weather today is sunny with a high of 72 degrees.",
-            0.000015f)]
+            -11.091f)]
         [InlineData(
             "query",
             "document text",
-            0.000027f)]
+            -10.537f)]
         [InlineData(
             "deep learning neural networks",
             "Neural networks learn hierarchical representations.",
-            0.725518f)]
+            0.972f)]
         [InlineData(
             "deep learning neural networks",
             "Python is a programming language.",
-            0.000012f)]
+            -11.327f)]
         [InlineData(
             "deep learning neural networks",
             "The cat sat on the mat.",
-            0.000012f)]
+            -11.313f)]
         public void Score_ExactValues(string query, string document, float expected)
         {
             var score = _reranker.Score(query, document);
             _output.WriteLine($"\"{query}\" / \"{document}\": {score:F6}");
 
-            // Six places, not two: these are probabilities now, and several of
-            // them differ only in the fifth decimal. At two places every
-            // irrelevant document is 0.00 and the assertion tests nothing.
-            Assert.Equal(expected, score, 6);
+            // Raw cross-encoder logits, which is what torch returns: both
+            // `transformers` and `sentence-transformers` give the unsquashed
+            // value, and the checkpoint declares Identity as its activation.
+            Assert.Equal(expected, score, 2);
         }
 
         [Fact]
@@ -186,7 +186,7 @@ namespace Kjarni.Tests
 
             Assert.Single(results);
             Assert.Equal(1, results[0].Index);
-            Assert.Equal(0.005591f, results[0].Score, 4);
+            Assert.Equal(-5.181f, results[0].Score, 2);
 
             _output.WriteLine($"Top result: [{results[0].Index}] {results[0].Score:F6} {results[0].Document}");
         }
