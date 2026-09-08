@@ -60,11 +60,15 @@ pub struct RerankResult {
     /// Original index in the input documents.
     pub index: usize,
 
-    /// Relevance, 0..1, higher is more relevant.
+    /// Relevance, higher is more relevant.
     ///
-    /// A probability rather than the cross-encoder's raw logit, unless
-    /// `return_raw_scores` was set. Comparable across queries only loosely: it is
-    /// calibrated for ranking, not as a confidence.
+    /// The cross-encoder's raw logit, which is what torch returns and so runs
+    /// roughly -11 to +11 rather than 0 to 1. Use [`Self::probability`] for a
+    /// readable number, or build the reranker with `normalize_scores` to get one
+    /// everywhere.
+    ///
+    /// Meaningful as an ordering rather than as a confidence: it is calibrated
+    /// for ranking, and is only loosely comparable across queries.
     pub score: f32,
 
     /// The document text.
@@ -72,6 +76,22 @@ pub struct RerankResult {
 }
 
 impl RerankResult {
+    /// [`Self::score`] squashed to 0..1, for display.
+    ///
+    /// The score itself stays a logit so it matches torch; this is the readable
+    /// form. Ordering is unchanged, because the squash is monotonic, so ranking
+    /// on either gives the same answer.
+    ///
+    /// Returns the score unchanged if the reranker already normalized, since
+    /// squashing twice would be wrong.
+    pub fn probability(&self) -> f32 {
+        if (0.0..=1.0).contains(&self.score) {
+            self.score
+        } else {
+            crate::reranker::model::sigmoid(self.score)
+        }
+    }
+
     /// Create a new rerank result.
     pub fn new(index: usize, score: f32, document: impl Into<String>) -> Self {
         Self {
@@ -107,12 +127,18 @@ pub struct RerankOverrides {
     /// Minimum score threshold.
     pub threshold: Option<f32>,
 
-    /// Return the cross-encoder's raw logit instead of a 0..1 probability.
+    /// Squash scores to 0..1 with a logistic instead of returning raw logits.
     ///
-    /// Off by default, so `score` is a probability and `threshold` is read on the
-    /// same scale. Turn it on only to recover the underlying logit; ranking is
-    /// identical either way, because the squash is monotonic.
-    pub return_raw_scores: bool,
+    /// Off by default, because a raw logit is what every reference returns: the
+    /// ms-marco checkpoint declares `Identity` as its activation, and both
+    /// `transformers` and `sentence-transformers` give the same unsquashed value.
+    /// Turning this on is a deliberate divergence from torch, and `threshold` is
+    /// then read on the 0..1 scale too.
+    ///
+    /// Ranking is identical either way, because the squash is monotonic; only the
+    /// numbers move. To convert a single score without changing the reranker, use
+    /// [`RerankResult::probability`].
+    pub normalize_scores: bool,
 
     /// Batch size for processing pairs.
     pub batch_size: Option<usize>,
@@ -124,7 +150,7 @@ impl RerankOverrides {
         Self {
             top_k: Some(10),
             threshold: None,
-            return_raw_scores: false,
+            normalize_scores: false,
             batch_size: None,
         }
     }
@@ -134,7 +160,7 @@ impl RerankOverrides {
         Self {
             top_k: None,
             threshold: Some(threshold),
-            return_raw_scores: false,
+            normalize_scores: false,
             batch_size: None,
         }
     }
@@ -144,7 +170,7 @@ impl RerankOverrides {
         Self {
             top_k: Some(k),
             threshold: None,
-            return_raw_scores: false,
+            normalize_scores: false,
             batch_size: None,
         }
     }

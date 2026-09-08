@@ -141,12 +141,14 @@ impl RerankerBuilder {
         self
     }
 
-    /// Return raw cross-encoder logits rather than 0..1 probabilities.
+    /// Squash scores to 0..1 instead of returning raw cross-encoder logits.
     ///
-    /// Ranking is unaffected: the squash is monotonic. This only changes the
-    /// numbers, and `threshold` is interpreted on whichever scale is in use.
-    pub fn return_raw_scores(mut self, raw: bool) -> Self {
-        self.overrides.return_raw_scores = raw;
+    /// A deliberate divergence from torch, which returns the logit. Ranking is
+    /// unaffected either way since the squash is monotonic; `threshold` is read
+    /// on whichever scale is in use. For a single readable number without
+    /// changing the reranker, use `RerankResult::probability()`.
+    pub fn normalize_scores(mut self, normalize: bool) -> Self {
+        self.overrides.normalize_scores = normalize;
         self
     }
 

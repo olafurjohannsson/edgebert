@@ -9,7 +9,7 @@ fn test_rerank_overrides_default() {
     let overrides = RerankOverrides::default();
     assert!(overrides.top_k.is_none());
     assert!(overrides.threshold.is_none());
-    assert!(!overrides.return_raw_scores);
+    assert!(!overrides.normalize_scores);
 }
 
 #[test]

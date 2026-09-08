@@ -12,39 +12,42 @@ use super::builder::RerankerBuilder;
 use super::types::{RerankOverrides, RerankResult, RerankerError, RerankerResult};
 use super::validation::validate_for_reranking;
 
-/// Turns raw cross-encoder logits into the scores a caller sees, then applies the
-/// threshold in that same space.
+/// Applies the caller's chosen score scale, then filters in that same scale.
 ///
-/// Separated from `rerank_with_config` so the transform can be tested without a
-/// model: it is the whole of the behaviour change, and the part most likely to
-/// break someone quietly.
+/// The default is the cross-encoder's raw logit, because that is what every
+/// reference implementation returns. `transformers` and `sentence-transformers`
+/// both give `[-1.182869, -10.904552]` for the same pair, and the ms-marco
+/// checkpoint declares `sbert_ce_default_activation_function:
+/// torch.nn.modules.linear.Identity` in its own config: the model ships an
+/// explicit instruction to apply no activation.
 ///
-/// A cross-encoder emits a logit, which for ms-marco runs from about -11 to +11
-/// and means nothing to a caller. Squashing it to a probability is what
-/// `return_raw_scores: false` has always promised and never done, and it is safe
-/// to change: sigmoid is monotonic, so every ranking is unchanged and only the
-/// printed numbers move.
+/// Squashing to a probability is available, but it is a divergence from torch
+/// rather than a nicety, which is why it is opt-in. `normalize_scores` was once
+/// the inverse of this and defaulted to squashing; the parity test caught it.
 ///
 /// The threshold is compared *after* the transform, so it is always read on
-/// whichever scale the scores are on. Comparing a 0..1 threshold against logits
-/// would silently pass almost everything.
+/// whichever scale the scores are on.
 fn score_and_filter(
     ranked: Vec<(usize, f32)>,
     overrides: &RerankOverrides,
 ) -> impl Iterator<Item = (usize, f32)> + '_ {
-    let raw = overrides.return_raw_scores;
+    let normalize = overrides.normalize_scores;
     ranked
         .into_iter()
-        .map(move |(index, logit)| (index, if raw { logit } else { sigmoid(logit) }))
+        .map(move |(index, logit)| (index, if normalize { sigmoid(logit) } else { logit }))
         .filter(move |(_, score)| overrides.threshold.map(|t| *score >= t).unwrap_or(true))
 }
 
 /// Logistic squash, saturating rather than overflowing at the extremes.
 ///
+/// Public because a cross-encoder logit is hard to read and a caller may want a
+/// 0..1 number without opting the whole reranker out of torch parity.
+/// [`RerankResult::probability`] is the convenient form.
+///
 /// `exp(-x)` for x around -100 is inf, and inf/inf is NaN, which would sort
 /// unpredictably. Cross-encoder logits do not reach that far, but a sort key is
 /// the wrong place to rely on that.
-fn sigmoid(x: f32) -> f32 {
+pub fn sigmoid(x: f32) -> f32 {
     if x >= 0.0 {
         1.0 / (1.0 + (-x).exp())
     } else {
@@ -255,10 +258,10 @@ impl Reranker {
     /// Relevance of one document to one query, on the same scale as
     /// [`RerankResult::score`].
     ///
-    /// 0..1 unless the reranker was built with `return_raw_scores`. This has to
-    /// agree with `rerank`: the two used to disagree, so scoring a pair directly
-    /// gave a logit while ranking the same pair gave a probability, and nothing
-    /// said which you had.
+    /// A raw logit unless the reranker was built with `normalize_scores`. This
+    /// has to agree with `rerank`: the two once disagreed, so scoring a pair
+    /// directly gave a logit while ranking the same pair gave a probability, and
+    /// nothing said which you had.
     pub async fn score(&self, query: &str, document: &str) -> RerankerResult<f32> {
         let raw = self
             .inner
@@ -270,11 +273,11 @@ impl Reranker {
 
     /// Applies the same transform `rerank` applies, so every score this type
     /// hands out is on one scale.
-    fn present(&self, raw: f32) -> f32 {
-        if self.default_overrides.return_raw_scores {
-            raw
+    fn present(&self, logit: f32) -> f32 {
+        if self.default_overrides.normalize_scores {
+            sigmoid(logit)
         } else {
-            sigmoid(raw)
+            logit
         }
     }
 
@@ -419,8 +422,7 @@ impl Reranker {
         RerankOverrides {
             top_k: runtime.top_k.or(self.default_overrides.top_k),
             threshold: runtime.threshold.or(self.default_overrides.threshold),
-            return_raw_scores: runtime.return_raw_scores
-                || self.default_overrides.return_raw_scores,
+            normalize_scores: runtime.normalize_scores || self.default_overrides.normalize_scores,
             batch_size: runtime.batch_size.or(self.default_overrides.batch_size),
         }
     }
@@ -430,11 +432,11 @@ impl Reranker {
 mod scoring_tests {
     use super::*;
 
-    fn overrides(raw: bool, threshold: Option<f32>) -> RerankOverrides {
+    fn overrides(normalize: bool, threshold: Option<f32>) -> RerankOverrides {
         RerankOverrides {
             top_k: None,
             threshold,
-            return_raw_scores: raw,
+            normalize_scores: normalize,
             batch_size: None,
         }
     }
@@ -505,64 +507,77 @@ mod scoring_tests {
         );
     }
 
+    /// Torch parity: the default must be the raw logit. Both `transformers` and
+    /// `sentence-transformers` return one, and the ms-marco checkpoint declares
+    /// `Identity` as its activation in its own config. Squashing here by default
+    /// once made `reranker_matches_torch` fail by 1.1e1.
     #[test]
-    fn scores_are_probabilities_by_default() {
+    fn scores_are_raw_logits_by_default() {
         let ranked = vec![(0, 1.3282f32), (1, -10.5874), (2, -11.0939)];
         let out: Vec<(usize, f32)> = score_and_filter(ranked, &overrides(false, None)).collect();
 
         assert_eq!(out.len(), 3, "no threshold means nothing is dropped");
+        assert_eq!(
+            out,
+            vec![(0, 1.3282), (1, -10.5874), (2, -11.0939)],
+            "the default must hand back torch's own numbers untouched"
+        );
+    }
+
+    /// Normalizing is available for callers who want a readable number and accept
+    /// diverging from torch to get it.
+    #[test]
+    fn normalizing_is_available_but_opt_in() {
+        let ranked = vec![(0, 1.3282f32), (1, -10.5874)];
+        let out: Vec<(usize, f32)> = score_and_filter(ranked, &overrides(true, None)).collect();
         assert!((out[0].1 - 0.790_542_72).abs() < 1e-6);
         for (_, s) in &out {
             assert!((0.0..=1.0).contains(s), "score {s} is not a probability");
         }
     }
 
-    #[test]
-    fn raw_scores_are_passed_through_untouched() {
-        let ranked = vec![(0, 1.3282f32), (1, -10.5874)];
-        let out: Vec<(usize, f32)> = score_and_filter(ranked, &overrides(true, None)).collect();
-        assert_eq!(out, vec![(0, 1.3282), (1, -10.5874)]);
-    }
-
-    /// The half most likely to break someone quietly. A threshold has to be read
-    /// on whichever scale the scores are on: 0.5 against probabilities keeps one
-    /// document here, while 0.5 against logits would keep the same one for an
-    /// entirely different reason, and 0.5 applied to the wrong scale would let
-    /// everything through.
+    /// A threshold has to be read on whichever scale the scores are on, or it
+    /// silently means something entirely different.
     #[test]
     fn threshold_is_read_on_the_same_scale_as_the_scores() {
         let ranked = vec![(0, 1.3282f32), (1, -10.5874), (2, -11.0939)];
 
-        // Probabilities: only the 0.79 document clears 0.5.
+        // Default: logits. Only the 1.33 document clears a 0.5 logit.
         let kept: Vec<usize> = score_and_filter(ranked.clone(), &overrides(false, Some(0.5)))
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(
-            kept,
-            vec![0],
-            "0.5 as a probability should keep only the match"
-        );
+        assert_eq!(kept, vec![0], "0.5 as a logit keeps only the match");
 
-        // Raw logits: 0.5 is a logit here, and only the 1.33 document clears it.
+        // Normalized: 0.5 is now a probability, and the same document clears it
+        // for an entirely different reason.
         let kept: Vec<usize> = score_and_filter(ranked.clone(), &overrides(true, Some(0.5)))
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(kept, vec![0], "0.5 as a logit should keep only the match");
+        assert_eq!(kept, vec![0], "0.5 as a probability keeps only the match");
 
-        // The failure this guards against: a probability threshold compared
-        // against logits. -1.0 is below every logit here, so everything would
-        // survive, which is what a mis-scaled threshold looks like in production.
-        let kept: Vec<usize> = score_and_filter(ranked, &overrides(true, Some(-1.0)))
+        // Where the scales visibly diverge. -1.0 filters logits, keeping one;
+        // against probabilities it cannot filter at all, because none is
+        // negative. That is what a mis-scaled threshold looks like in production.
+        let kept: Vec<usize> = score_and_filter(ranked.clone(), &overrides(false, Some(-1.0)))
             .map(|(i, _)| i)
             .collect();
         assert_eq!(kept, vec![0], "only one logit is above -1.0");
+
+        let kept: Vec<usize> = score_and_filter(ranked, &overrides(true, Some(-1.0)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            kept.len(),
+            3,
+            "a negative threshold cannot filter probabilities"
+        );
     }
 
     #[test]
     fn a_threshold_above_everything_returns_nothing() {
         let ranked = vec![(0, 1.3282f32), (1, -10.5874)];
         let out: Vec<(usize, f32)> =
-            score_and_filter(ranked, &overrides(false, Some(0.999))).collect();
+            score_and_filter(ranked, &overrides(true, Some(0.999))).collect();
         assert!(
             out.is_empty(),
             "nothing should clear a 0.999 probability here"
