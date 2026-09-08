@@ -38,6 +38,7 @@ async fn main() -> Result<()> {
             gpu,
             no_stream,
             quiet,
+            gguf,
             draft,
             draft_tokens,
         } => {
@@ -55,6 +56,7 @@ async fn main() -> Result<()> {
                 gpu,
                 no_stream,
                 quiet,
+                gguf,
                 draft.as_deref(),
                 draft_tokens,
             )
@@ -239,6 +241,7 @@ async fn main() -> Result<()> {
             max_tokens,
             gpu,
             quiet,
+            gguf,
             draft,
             draft_tokens,
         } => {
@@ -250,6 +253,7 @@ async fn main() -> Result<()> {
                 max_tokens,
                 gpu,
                 quiet,
+                gguf,
                 draft.as_deref(),
                 draft_tokens,
             )

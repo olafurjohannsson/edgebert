@@ -481,6 +481,11 @@ namespace Kjarni
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern void kjarni_reranker_free(IntPtr handle);
 
+        /// Logit to 0..1. One implementation, in the engine, so the saturation
+        /// branch cannot be omitted by a binding.
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern float kjarni_sigmoid(float x);
+
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern KjarniErrorCode kjarni_reranker_score(
             IntPtr handle,

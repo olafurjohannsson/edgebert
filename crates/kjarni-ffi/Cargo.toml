@@ -21,6 +21,10 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 default = []
 c-bindings = []
 
+# CLIP image search. Off by default: a host that already holds decoded pixels
+# needs no JPEG decoder, and this pulls one in.
+image-io = ["kjarni/image-io"]
+
 [dependencies]
 kjarni = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }

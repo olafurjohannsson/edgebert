@@ -7,6 +7,27 @@ use kjarni::reranker::RerankerError;
 use std::ffi::{CStr, c_char, c_float};
 use std::ptr;
 
+/// Puts a cross-encoder logit on a 0..1 scale.
+///
+/// Exported rather than reimplemented per binding. It is one line of arithmetic,
+/// but the branch is not decoration: `exp(-x)` overflows to infinity for a large
+/// negative x and `inf / inf` is NaN, which sorts unpredictably. A binding author
+/// writing the obvious one-liner gets a function that passes every value they try
+/// and returns NaN in production, so there is one implementation and it lives
+/// here.
+///
+/// Monotonic, so ranking is identical either way; only the numbers move. Scores
+/// stay logits by default because that is what PyTorch returns.
+#[unsafe(no_mangle)]
+pub extern "C" fn kjarni_sigmoid(x: c_float) -> c_float {
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
+
 /// Single rerank result
 #[repr(C)]
 pub struct KjarniRerankResult {

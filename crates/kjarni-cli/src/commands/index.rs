@@ -64,7 +64,7 @@ pub async fn run(action: IndexCommands) -> Result<()> {
 /// Create a new index from documents
 async fn create(
     output: &str,
-    _from_chunks: Option<String>,
+    from_chunks: Option<String>,
     inputs: &[String],
     chunk_size: usize,
     chunk_overlap: usize,
@@ -72,9 +72,10 @@ async fn create(
     gpu: bool,
     quiet: bool,
 ) -> Result<()> {
-    if inputs.is_empty() {
+    if inputs.is_empty() && from_chunks.is_none() {
         return Err(anyhow!(
-            "No input files specified. Provide files or directories to index."
+            "No input files specified. Provide files or directories to index, \
+             or --from-chunks with a JSONL file."
         ));
     }
 
@@ -98,15 +99,20 @@ async fn create(
     let mut writer = IndexWriter::open(output, config)?;
 
     // Process documents
-    let total_indexed = process_inputs(
-        &mut writer,
-        &embedder,
-        inputs,
-        chunk_size,
-        chunk_overlap,
-        quiet,
-    )
-    .await?;
+    let total_indexed = match &from_chunks {
+        Some(path) => process_chunk_file(&mut writer, &embedder, path, quiet).await?,
+        None => {
+            process_inputs(
+                &mut writer,
+                &embedder,
+                inputs,
+                chunk_size,
+                chunk_overlap,
+                quiet,
+            )
+            .await?
+        }
+    };
 
     if total_indexed == 0 {
         return Err(anyhow!("No documents found to index."));
@@ -187,6 +193,80 @@ async fn add(
     }
 
     Ok(())
+}
+
+/// Indexes a JSONL file of already-chunked documents, one object per line.
+///
+/// `{"text": "...", "metadata": {"k": "v"}}`, where `metadata` is optional and its
+/// values are strings. Chunking is skipped entirely, which is the point: a caller
+/// who has already split documents their own way should not have them re-split.
+///
+/// The flag existed and was accepted for some time while the handler ignored it,
+/// so `--from-chunks` parsed and then failed with "No input files specified".
+async fn process_chunk_file(
+    writer: &mut IndexWriter,
+    embedder: &Embedder,
+    path: &str,
+    quiet: bool,
+) -> Result<usize> {
+    use std::io::BufRead;
+
+    let file =
+        std::fs::File::open(path).map_err(|e| anyhow!("could not open chunk file {path}: {e}"))?;
+    let reader = std::io::BufReader::new(file);
+
+    let mut texts: Vec<String> = Vec::new();
+    let mut metadata: Vec<HashMap<String, String>> = Vec::new();
+    let mut total = 0usize;
+
+    for (lineno, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| anyhow!("reading {path} line {}: {e}", lineno + 1))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let value: serde_json::Value =
+            serde_json::from_str(&line).map_err(|e| anyhow!("{path} line {}: {e}", lineno + 1))?;
+
+        // A line without text is a mistake worth naming rather than skipping: it
+        // would otherwise show up later as an index that is quietly short.
+        let text = value
+            .get("text")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| anyhow!("{path} line {}: no \"text\" field", lineno + 1))?;
+
+        let mut meta = HashMap::new();
+        if let Some(obj) = value.get("metadata").and_then(|m| m.as_object()) {
+            for (k, v) in obj {
+                if let Some(s) = v.as_str() {
+                    meta.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+
+        texts.push(text.to_string());
+        metadata.push(meta);
+
+        if texts.len() >= ENCODE_BATCH_SIZE {
+            total += flush_batch(writer, embedder, &mut texts, &mut metadata).await?;
+            if !quiet && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                eprint!("\r  Indexed {total} documents");
+            }
+        }
+    }
+
+    if !texts.is_empty() {
+        total += flush_batch(writer, embedder, &mut texts, &mut metadata).await?;
+    }
+
+    if !quiet && total > 0 {
+        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            eprintln!("\r  Indexed {total} documents");
+        } else {
+            eprintln!("  Indexed {total} documents");
+        }
+    }
+    Ok(total)
 }
 
 async fn process_inputs(
@@ -274,7 +354,11 @@ async fn process_inputs(
                 total_indexed +=
                     flush_batch(writer, embedder, &mut batch_texts, &mut batch_metadata).await?;
 
-                if !quiet {
+                // Carriage-return progress only makes sense on a terminal. Piped
+                // or redirected it emits one line per batch with no newline
+                // between them, which for the Python docs was a thousand copies
+                // of "Indexed N documents" run together in the log.
+                if !quiet && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                     eprint!("\r  Indexed {} documents", total_indexed);
                 }
             }
@@ -286,8 +370,14 @@ async fn process_inputs(
             flush_batch(writer, embedder, &mut batch_texts, &mut batch_metadata).await?;
     }
 
+    // The final count is worth having in a log, so this one is unconditional; only
+    // the leading \r is dropped when nothing will consume it.
     if !quiet && total_indexed > 0 {
-        eprintln!("\r  Indexed {} documents", total_indexed);
+        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            eprintln!("\r  Indexed {} documents", total_indexed);
+        } else {
+            eprintln!("  Indexed {} documents", total_indexed);
+        }
     }
 
     Ok(total_indexed)
@@ -563,5 +653,64 @@ mod tests {
         const { assert!(ENCODE_BATCH_SIZE > 0) };
         const { assert!(ENCODE_BATCH_SIZE <= 128) };
         assert_eq!(ENCODE_BATCH_SIZE, 32);
+    }
+
+    /// The JSONL shape `--from-chunks` accepts. Parsing is asserted separately
+    /// from indexing so a malformed line can be checked without loading a model.
+    fn parse_line(line: &str) -> Result<(String, HashMap<String, String>)> {
+        let value: serde_json::Value = serde_json::from_str(line)?;
+        let text = value
+            .get("text")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| anyhow!("no \"text\" field"))?;
+        let mut meta = HashMap::new();
+        if let Some(obj) = value.get("metadata").and_then(|m| m.as_object()) {
+            for (k, v) in obj {
+                if let Some(sv) = v.as_str() {
+                    meta.insert(k.clone(), sv.to_string());
+                }
+            }
+        }
+        Ok((text.to_string(), meta))
+    }
+
+    #[test]
+    fn a_chunk_line_needs_only_text() {
+        let (text, meta) = parse_line(r#"{"text": "hello"}"#).unwrap();
+        assert_eq!(text, "hello");
+        assert!(meta.is_empty(), "metadata is optional");
+    }
+
+    #[test]
+    fn string_metadata_is_carried_through() {
+        let (_, meta) =
+            parse_line(r#"{"text": "x", "metadata": {"source": "a.txt", "page": "3"}}"#).unwrap();
+        assert_eq!(meta.get("source").map(String::as_str), Some("a.txt"));
+        assert_eq!(meta.get("page").map(String::as_str), Some("3"));
+    }
+
+    /// Non-string metadata values are dropped rather than stringified, because the
+    /// index stores strings and guessing a format for a number or an object would
+    /// be inventing data.
+    #[test]
+    fn non_string_metadata_is_dropped_not_coerced() {
+        let (_, meta) =
+            parse_line(r#"{"text": "x", "metadata": {"n": 3, "ok": "yes", "sub": {"a": 1}}}"#)
+                .unwrap();
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta.get("ok").map(String::as_str), Some("yes"));
+    }
+
+    /// A line with no text would otherwise become an index that is quietly short.
+    #[test]
+    fn a_line_without_text_is_an_error() {
+        let err = parse_line(r#"{"body": "oops"}"#).unwrap_err().to_string();
+        assert!(err.contains("text"), "{err}");
+    }
+
+    #[test]
+    fn malformed_json_is_an_error() {
+        assert!(parse_line("{not json").is_err());
+        assert!(parse_line("").is_err());
     }
 }

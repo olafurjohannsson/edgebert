@@ -79,7 +79,15 @@ impl DecoderLoader {
             WeightsFormat::SafeTensors
         };
 
-        download_model_files(&model_dir, &info.paths, format, config.quiet).await?;
+        // The returned path is the weights file that was actually chosen, and it
+        // has to be carried into the load. Discarding it and passing the directory
+        // meant `ModelWeights::new` re-decided for itself, and its directory
+        // branch prefers safetensors whenever they are present: a cache holding
+        // both got safetensors however loudly `use_gguf` was set. The GGUF was
+        // downloaded and then ignored, so asking for quantized weights cost a
+        // 2GB download and changed nothing.
+        let weights_path =
+            download_model_files(&model_dir, &info.paths, format, config.quiet).await?;
 
         let context = if device.is_gpu() && context.is_none() {
             Some(WgpuContext::new().await?)
@@ -87,7 +95,17 @@ impl DecoderLoader {
             context
         };
 
-        Self::load_from_pretrained::<M>(&model_dir, device, context, load_config, Some(model_type))
+        // Only a GGUF is addressed as a file. The safetensors branch returns
+        // `model.safetensors.index.json` for a sharded model, which
+        // `ModelWeights::new` does not accept as a file path: it wants the
+        // directory so it can resolve the shards through the index.
+        let load_path = if weights_path.extension().and_then(|e| e.to_str()) == Some("gguf") {
+            weights_path
+        } else {
+            model_dir
+        };
+
+        Self::load_from_pretrained::<M>(&load_path, device, context, load_config, Some(model_type))
     }
 
     /// Load from a directory on disk. Native only.

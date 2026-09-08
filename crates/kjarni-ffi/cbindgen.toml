@@ -14,6 +14,10 @@ sys_includes = ["stdint.h", "stddef.h", "stdbool.h"]
 
 [defines]
 "feature = c-bindings" = "KJARNI_FFI"
+# Image search is feature-gated in Rust, so its declarations are guarded here too.
+# Without this entry cbindgen emits them unconditionally, and a C caller linking a
+# build without the feature gets declarations for symbols that do not exist.
+"feature = image-io" = "KJARNI_IMAGE_IO"
 
 [export]
 # No prefix: every exported type is already named `Kjarni*` in Rust, so adding one

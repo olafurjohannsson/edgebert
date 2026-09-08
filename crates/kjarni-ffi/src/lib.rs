@@ -4,6 +4,8 @@ mod chat;
 mod classifier;
 mod embedder;
 mod error;
+#[cfg(feature = "image-io")]
+mod image_index;
 mod indexer;
 mod panic;
 mod reranker;

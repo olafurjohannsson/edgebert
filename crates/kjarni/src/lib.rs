@@ -47,6 +47,7 @@ pub use kjarni_transformers::traits::Device;
 // without the CLI depending on kjarni-transformers directly.
 #[cfg(not(target_arch = "wasm32"))]
 pub use kjarni_transformers::cache::PrefixCache;
+pub use kjarni_transformers::models::base::ModelLoadConfig;
 pub use kjarni_transformers::weights::{GgufLoader, SafeTensorsLoader, WeightLoader};
 // Re-export generation
 pub use kjarni_transformers::common::{

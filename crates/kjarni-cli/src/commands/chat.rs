@@ -41,6 +41,7 @@ pub async fn run(
     max_tokens: usize,
     gpu: bool,
     quiet: bool,
+    gguf: bool,
     draft: Option<&str>,
     draft_tokens: usize,
 ) -> Result<()> {
@@ -66,6 +67,12 @@ pub async fn run(
         builder = builder.gpu();
     } else {
         builder = builder.cpu();
+    }
+
+    // Quantized weights, when the model publishes them. Measurably faster to
+    // decode and much smaller in memory; falls back to safetensors otherwise.
+    if gguf {
+        builder = builder.with_load_config(|c| c.prefer_gguf(true));
     }
 
     if let Some(draft_name) = draft {
