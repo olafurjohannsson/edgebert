@@ -3,6 +3,8 @@
 use anyhow::{Result, anyhow};
 use futures::{StreamExt, pin_mut};
 
+use kjarni::ModelLoadConfig;
+use kjarni::common::LoadConfigBuilder;
 use kjarni::{
     DecoderGenerator, DecoderLanguageModel, DecodingStrategy, Device, GenerationConfig,
     ModelArchitecture, ModelType, SamplingParams, SpeculationParams, TokenType, WgpuContext,
@@ -28,6 +30,7 @@ pub async fn run(
     gpu: bool,
     no_stream: bool,
     quiet: bool,
+    gguf: bool,
     draft: Option<&str>,
     draft_tokens: usize,
 ) -> Result<()> {
@@ -74,6 +77,13 @@ pub async fn run(
     // quantised model: the registry has no GGUF entries, so `llama3.2-3b-instruct`
     // resolves to the 6GB bf16 copy and decode streams four times the weights a
     // Q4_K_M file would.
+    let load_cfg = gguf.then(|| {
+        LoadConfigBuilder::new()
+            .prefer_gguf(true)
+            .build()
+            .into_inner()
+    });
+
     let loaded_model: Arc<dyn DecoderLanguageModel> = if let Some(path) = model_path {
         let p = std::path::Path::new(path);
         if !p.exists() {
@@ -104,16 +114,16 @@ pub async fn run(
             Some(model_type),
         )?)
     } else if model_type.is_llama_model() {
-        Arc::new(LlamaModel::from_registry(model_type, None, device, None, None).await?)
+        Arc::new(LlamaModel::from_registry(model_type, None, device, None, load_cfg).await?)
     } else if model_type.is_qwen_model() {
         // The registry has carried `is_qwen_model` all along and this dispatch
         // never used it, so `kjarni chat` ran Qwen while `kjarni generate`
         // rejected it as unsupported.
-        Arc::new(QwenModel::from_registry(model_type, None, device, None, None).await?)
+        Arc::new(QwenModel::from_registry(model_type, None, device, None, load_cfg).await?)
     } else if model_type.is_phi_model() {
-        Arc::new(PhiModel::from_registry(model_type, None, device, None, None).await?)
+        Arc::new(PhiModel::from_registry(model_type, None, device, None, load_cfg).await?)
     } else if model_type.is_gpt2_model() {
-        Arc::new(Gpt2Model::from_registry(model_type, None, device, None, None).await?)
+        Arc::new(Gpt2Model::from_registry(model_type, None, device, None, load_cfg).await?)
     } else {
         return Err(anyhow!(
             "Model '{}' not yet supported for generation.",
@@ -133,7 +143,7 @@ pub async fn run(
         if !quiet {
             eprintln!("Loading draft model '{draft_name}'...");
         }
-        let draft_model = load_decoder_from_registry(draft_type, device).await?;
+        let draft_model = load_decoder_from_registry(draft_type, device, load_cfg).await?;
         generator.load_draft_model(draft_model)?;
         Some(SpeculationParams {
             num_tokens: draft_tokens,
@@ -211,15 +221,16 @@ fn is_supported_decoder_architecture(arch: ModelArchitecture) -> bool {
 async fn load_decoder_from_registry(
     model_type: ModelType,
     device: Device,
+    load_cfg: Option<ModelLoadConfig>,
 ) -> Result<Arc<dyn DecoderLanguageModel>> {
     let m: Arc<dyn DecoderLanguageModel> = if model_type.is_llama_model() {
-        Arc::new(LlamaModel::from_registry(model_type, None, device, None, None).await?)
+        Arc::new(LlamaModel::from_registry(model_type, None, device, None, load_cfg).await?)
     } else if model_type.is_qwen_model() {
-        Arc::new(QwenModel::from_registry(model_type, None, device, None, None).await?)
+        Arc::new(QwenModel::from_registry(model_type, None, device, None, load_cfg).await?)
     } else if model_type.is_phi_model() {
-        Arc::new(PhiModel::from_registry(model_type, None, device, None, None).await?)
+        Arc::new(PhiModel::from_registry(model_type, None, device, None, load_cfg).await?)
     } else if model_type.is_gpt2_model() {
-        Arc::new(Gpt2Model::from_registry(model_type, None, device, None, None).await?)
+        Arc::new(Gpt2Model::from_registry(model_type, None, device, None, load_cfg).await?)
     } else {
         return Err(anyhow!(
             "Model '{}' not yet supported for generation.",

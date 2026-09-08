@@ -30,6 +30,7 @@ pub async fn index(inputs: &[String], output: &str, quiet: bool) -> Result<()> {
 
     let mut total = 0usize;
     let mut failures = Vec::new();
+    let mut unsupported: std::collections::BTreeMap<String, usize> = Default::default();
     for input in inputs {
         let path = Path::new(input);
         let report = if path.is_dir() {
@@ -51,9 +52,25 @@ pub async fn index(inputs: &[String], output: &str, quiet: bool) -> Result<()> {
         };
         total += report.added;
         failures.extend(report.failures);
+        for (ext, n) in report.unsupported {
+            *unsupported.entry(ext).or_insert(0) += n;
+        }
         if !quiet {
             println!("  {input}: {} indexed", report.added);
         }
+    }
+
+    if !unsupported.is_empty() {
+        let total: usize = unsupported.values().sum();
+        let kinds: Vec<String> = unsupported
+            .iter()
+            .map(|(ext, n)| format!("{n} .{ext}"))
+            .collect();
+        eprintln!(
+            "\n{} {total} file(s) skipped, no decoder for: {}",
+            "note:".yellow(),
+            kinds.join(", ")
+        );
     }
 
     // Named individually rather than counted: a photo library with three

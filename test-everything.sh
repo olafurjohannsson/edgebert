@@ -120,12 +120,18 @@ stage_fixtures() {
     # KJQ8 is what the browser needs for a decoder: block-quantised weights that
     # are never expanded to f32. Qwen is built only as KJQ8, which is what is
     # published and the only encoding that fits a browser.
+    #
+    # Its output is named `-q8` rather than `-kjq8` even though it holds KJQ8:
+    # that is the basename `crates/kjarni-wasm/tests/bindings.rs` derives from the
+    # published path, and `model_bytes` looks a fixture up by file name. Building
+    # it as `qwen05b-kjq8.kjq` left seven decoder tests failing on a clean /tmp,
+    # and passing only while a stale file from an older run happened to survive.
     local triples=(
         "sentence-transformers_all-MiniLM-L6-v2:all-MiniLM-L6-v2-q8.kjq:kjq1"
         "cross-encoder_ms-marco-MiniLM-L-6-v2:ms-marco-MiniLM-L-6-v2-q8.kjq:kjq1"
         "distilbert_distilbert-base-uncased-finetuned-sst-2-english:distilbert-sentiment-q8.kjq:kjq1"
         "sentence-transformers_all-MiniLM-L6-v2:all-MiniLM-L6-v2-kjq8.kjq:kjq8"
-        "Qwen_Qwen2.5-0.5B-Instruct:qwen05b-kjq8.kjq:kjq8"
+        "Qwen_Qwen2.5-0.5B-Instruct:qwen05b-q8.kjq:kjq8"
     )
     ensure_venv || return 1
     local py="$VENV/bin/python"

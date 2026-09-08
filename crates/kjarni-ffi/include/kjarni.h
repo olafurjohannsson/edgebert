@@ -132,6 +132,13 @@ typedef struct KjarniClassifier KjarniClassifier;
  */
 typedef struct KjarniEmbedder KjarniEmbedder;
 
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * An image index with its models loaded.
+ */
+typedef struct KjarniImageIndex KjarniImageIndex;
+#endif
+
 /**
  * Opaque handle to an Indexer instance.
  *
@@ -321,6 +328,39 @@ typedef struct KjarniEmbedderConfig {
    */
   int32_t quiet;
 } KjarniEmbedderConfig;
+
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * What a scan did. Files that could not be decoded are counted, not fatal: one
+ * truncated download should not abandon a scan of ten thousand photos.
+ */
+typedef struct KjarniScanReport {
+  uintptr_t added;
+  uintptr_t skipped;
+} KjarniScanReport;
+#endif
+
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * One ranked image.
+ *
+ * `path` is owned by this struct and freed by [`kjarni_image_results_free`].
+ */
+typedef struct KjarniImageHit {
+  char *path;
+  float score;
+} KjarniImageHit;
+#endif
+
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * A ranked list, and how many images could not be read.
+ */
+typedef struct KjarniImageResults {
+  struct KjarniImageHit *hits;
+  uintptr_t len;
+} KjarniImageResults;
+#endif
 
 /**
  * Information about an existing index
@@ -968,6 +1008,115 @@ const char *kjarni_last_error_message(void);
  */
 void kjarni_clear_error(void);
 
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * Loads CLIP from a model directory, as `kjarni model download` leaves it.
+ *
+ * # Safety
+ * `model_dir` must be a valid NUL-terminated path. `out` must be a valid pointer
+ * to write the handle into.
+ */
+enum KjarniErrorCode kjarni_image_index_new(const char *model_dir, struct KjarniImageIndex **out);
+#endif
+
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * Frees an image index.
+ *
+ * # Safety
+ * `index` must be null, or a handle from `kjarni_image_index_new` that has not
+ * already been freed.
+ */
+void kjarni_image_index_free(struct KjarniImageIndex *index);
+#endif
+
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * Embeds one image file and adds or replaces it.
+ *
+ * # Safety
+ * Both pointers must be valid; `path` must be NUL-terminated.
+ */
+enum KjarniErrorCode kjarni_image_index_add(struct KjarniImageIndex *index, const char *path);
+#endif
+
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * Walks a directory and indexes every image in it.
+ *
+ * # Safety
+ * `index` and `dir` must be valid; `dir` must be NUL-terminated. `report` may be
+ * null if the counts are not wanted.
+ */
+enum KjarniErrorCode kjarni_image_index_add_directory(struct KjarniImageIndex *index,
+                                                      const char *dir,
+                                                      struct KjarniScanReport *report);
+#endif
+
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * Ranks indexed images against a description.
+ *
+ * Scores are cosine similarities and are small in absolute terms even for a good
+ * match, typically 0.2 to 0.35. Only the ordering is meaningful.
+ *
+ * # Safety
+ * All pointers must be valid; `query` must be NUL-terminated. The result must be
+ * released with [`kjarni_image_results_free`].
+ */
+enum KjarniErrorCode kjarni_image_index_search(const struct KjarniImageIndex *index,
+                                               const char *query,
+                                               uintptr_t top_k,
+                                               struct KjarniImageResults *out);
+#endif
+
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * Frees a result list and every path in it.
+ *
+ * # Safety
+ * `results` must come from `kjarni_image_index_search` and be freed once.
+ */
+void kjarni_image_results_free(struct KjarniImageResults results);
+#endif
+
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * Writes the vectors to `path`. The images stay where they are.
+ *
+ * # Safety
+ * Both pointers must be valid; `path` must be NUL-terminated.
+ */
+enum KjarniErrorCode kjarni_image_index_save(const struct KjarniImageIndex *index,
+                                             const char *path);
+#endif
+
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * Loads previously computed vectors, leaving the models as they are.
+ *
+ * Refuses an index whose vectors are the wrong width, which means it was built
+ * with a different checkpoint and cannot be compared against this one.
+ *
+ * # Safety
+ * Both pointers must be valid; `path` must be NUL-terminated. `count` may be
+ * null.
+ */
+enum KjarniErrorCode kjarni_image_index_load(struct KjarniImageIndex *index,
+                                             const char *path,
+                                             uintptr_t *count);
+#endif
+
+#if defined(KJARNI_IMAGE_IO)
+/**
+ * How many images are indexed.
+ *
+ * # Safety
+ * `index` must be null or a live handle.
+ */
+uintptr_t kjarni_image_index_len(const struct KjarniImageIndex *index);
+#endif
+
 /**
  * Free memory allocated for index info strings
  *
@@ -1156,6 +1305,21 @@ uintptr_t kjarni_indexer_dimension(const struct KjarniIndexer *indexer);
  *   been freed.
  */
 uintptr_t kjarni_indexer_chunk_size(const struct KjarniIndexer *indexer);
+
+/**
+ * Puts a cross-encoder logit on a 0..1 scale.
+ *
+ * Exported rather than reimplemented per binding. It is one line of arithmetic,
+ * but the branch is not decoration: `exp(-x)` overflows to infinity for a large
+ * negative x and `inf / inf` is NaN, which sorts unpredictably. A binding author
+ * writing the obvious one-liner gets a function that passes every value they try
+ * and returns NaN in production, so there is one implementation and it lives
+ * here.
+ *
+ * Monotonic, so ranking is identical either way; only the numbers move. Scores
+ * stay logits by default because that is what PyTorch returns.
+ */
+float kjarni_sigmoid(float x);
 
 /**
  * Free rerank results

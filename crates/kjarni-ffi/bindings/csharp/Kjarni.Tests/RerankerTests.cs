@@ -236,5 +236,32 @@ namespace Kjarni.Tests
             reranker.Dispose();
             reranker.Dispose();
         }
+        [Fact]
+        public void Probability_IsOnAZeroToOneScale()
+        {
+            var results = _reranker.Rerank(
+                "What is machine learning?",
+                new[]
+                {
+                    "Machine learning is a subset of artificial intelligence.",
+                    "The weather today is sunny.",
+                });
+
+            foreach (var r in results)
+            {
+                Assert.InRange(r.Probability, 0f, 1f);
+            }
+
+            // Monotonic, so ranking is unchanged by the transform.
+            Assert.True(results[0].Score > results[1].Score);
+            Assert.True(results[0].Probability > results[1].Probability);
+
+            // sigmoid(0) is the midpoint, and the extremes saturate rather than
+            // producing NaN.
+            Assert.Equal(0.5f, RerankResult.Sigmoid(0f), 6);
+            Assert.Equal(0f, RerankResult.Sigmoid(-1000f), 6);
+            Assert.Equal(1f, RerankResult.Sigmoid(1000f), 6);
+        }
+
     }
 }

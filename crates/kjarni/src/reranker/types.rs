@@ -79,17 +79,14 @@ impl RerankResult {
     /// [`Self::score`] squashed to 0..1, for display.
     ///
     /// The score itself stays a logit so it matches torch; this is the readable
-    /// form. Ordering is unchanged, because the squash is monotonic, so ranking
-    /// on either gives the same answer.
+    /// form. Ordering is unchanged, because the squash is monotonic.
     ///
-    /// Returns the score unchanged if the reranker already normalized, since
-    /// squashing twice would be wrong.
+    /// Assumes the default scale. Calling this on a reranker built with
+    /// `normalize_scores` squashes twice and is wrong, and no check here can
+    /// prevent it: a logit of 0.972 is a real value from the ms-marco model, and
+    /// nothing distinguishes it from a probability of 0.972.
     pub fn probability(&self) -> f32 {
-        if (0.0..=1.0).contains(&self.score) {
-            self.score
-        } else {
-            crate::reranker::model::sigmoid(self.score)
-        }
+        crate::reranker::model::sigmoid(self.score)
     }
 
     /// Create a new rerank result.

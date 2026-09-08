@@ -583,4 +583,27 @@ mod scoring_tests {
             "nothing should clear a 0.999 probability here"
         );
     }
+
+    /// The escape hatch for a readable number without diverging from torch.
+    #[test]
+    fn probability_squashes_a_logit() {
+        use crate::reranker::types::RerankResult;
+        assert!((RerankResult::new(0, 1.3282, "d").probability() - 0.790_542_72).abs() < 1e-6);
+        assert!((RerankResult::new(0, -10.5874, "d").probability() - 0.000_025_231).abs() < 1e-9);
+        assert!((RerankResult::new(0, 0.0, "d").probability() - 0.5).abs() < 1e-6);
+    }
+
+    /// A logit inside 0..1 is perfectly ordinary, so `probability` cannot detect
+    /// an already-normalized score and must not try. An earlier version returned
+    /// any score in that range unchanged, which silently mis-converted 0.972 — a
+    /// real ms-marco logit that appears in the C# binding's own test data.
+    #[test]
+    fn a_logit_inside_zero_to_one_is_still_squashed() {
+        use crate::reranker::types::RerankResult;
+        let got = RerankResult::new(0, 0.972, "d").probability();
+        assert!(
+            (got - 0.725_517_99).abs() < 1e-6,
+            "0.972 is a logit, not a probability: got {got}"
+        );
+    }
 }

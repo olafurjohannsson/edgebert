@@ -9,8 +9,30 @@ namespace Kjarni
     public readonly struct RerankResult
     {
         public int Index { get; }
+
+        /// <summary>
+        /// The cross-encoder's raw logit, matching what PyTorch returns. Roughly
+        /// -11 to +11. See <see cref="Probability"/> for a 0..1 scale.
+        /// </summary>
         public float Score { get; }
+
         public string Document { get; }
+
+        /// <summary>
+        /// <see cref="Score"/> on a 0..1 scale. Ordering is identical; the
+        /// transform is monotonic.
+        /// </summary>
+        public float Probability => Sigmoid(Score);
+
+        /// <summary>
+        /// Logistic squash, for putting a logit on a 0..1 scale.
+        ///
+        /// Calls into the engine rather than reimplementing it. The formula is one
+        /// line, but it needs a branch: the naive form overflows to NaN for large
+        /// negative inputs, and five bindings each writing their own is five
+        /// chances to omit it.
+        /// </summary>
+        public static float Sigmoid(float x) => Native.kjarni_sigmoid(x);
 
         internal RerankResult(int index, float score, string document)
         {

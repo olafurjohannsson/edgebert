@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use kjarni_rag::{DocumentLoader, KIND_IMAGE, KIND_KEY, LoaderConfig};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::config::ClipConfig;
@@ -45,6 +46,11 @@ pub struct ScanReport {
     /// Path and reason, so a caller can show which photos were dropped rather
     /// than silently indexing fewer than the user has.
     pub failures: Vec<(PathBuf, String)>,
+    /// Extensions that look like images but have no decoder, and how many of each.
+    ///
+    /// Separate from `failures` because these never reach a decoder: the loader
+    /// filters them out by extension. Counted because otherwise they vanish.
+    pub unsupported: std::collections::BTreeMap<String, usize>,
 }
 
 pub struct ImageIndex {
@@ -95,18 +101,11 @@ impl ImageIndex {
             .vision
             .embed_image_file(path)
             .with_context(|| format!("embedding {}", path.display()))?;
-        let entry = IndexedImage {
+        self.insert(IndexedImage {
             path: path.to_path_buf(),
             embedding: embedding.to_vec(),
             filename_text: filename_words(path),
-        };
-        match self.by_path.get(path) {
-            Some(&at) => self.entries[at] = entry,
-            None => {
-                self.by_path.insert(path.to_path_buf(), self.entries.len());
-                self.entries.push(entry);
-            }
-        }
+        });
         Ok(())
     }
 
@@ -123,17 +122,47 @@ impl ImageIndex {
             .load_directory(dir)
             .with_context(|| format!("scanning {}", dir.display()))?;
 
-        let mut report = ScanReport::default();
-        for chunk in chunks {
-            if chunk.metadata.custom.get(KIND_KEY).map(String::as_str) != Some(KIND_IMAGE) {
-                continue;
-            }
-            let Some(source) = chunk.metadata.source.as_ref() else {
-                continue;
-            };
-            let path = PathBuf::from(source);
-            match self.add_image(&path) {
-                Ok(()) => report.added += 1,
+        let paths: Vec<PathBuf> = chunks
+            .into_iter()
+            .filter(|c| c.metadata.custom.get(KIND_KEY).map(String::as_str) == Some(KIND_IMAGE))
+            .filter_map(|c| c.metadata.source.map(PathBuf::from))
+            .collect();
+
+        // One image at a time left 23 of 24 cores idle: a single 224x224 image is
+        // 50 positions through 12 blocks, which is far too little work for the
+        // encoder's own parallelism to fill a machine. Decoding, preprocessing and
+        // embedding are independent per image, so the scan parallelises across
+        // files instead of within one.
+        //
+        // Insertion stays serial and in path order, so a rescan produces the same
+        // index whatever order the threads finished in.
+        let embedded: Vec<(PathBuf, Result<Vec<f32>>)> = paths
+            .into_par_iter()
+            .map(|path| {
+                let vector = self
+                    .vision
+                    .embed_image_file(&path)
+                    .with_context(|| format!("embedding {}", path.display()))
+                    .map(|v| v.to_vec());
+                (path, vector)
+            })
+            .collect();
+
+        let mut report = ScanReport {
+            unsupported: unsupported_image_files(dir),
+            ..Default::default()
+        };
+
+        for (path, vector) in embedded {
+            match vector {
+                Ok(embedding) => {
+                    self.insert(IndexedImage {
+                        filename_text: filename_words(&path),
+                        path,
+                        embedding,
+                    });
+                    report.added += 1;
+                }
                 Err(e) => {
                     report.skipped += 1;
                     report.failures.push((path, format!("{e:#}")));
@@ -141,6 +170,18 @@ impl ImageIndex {
             }
         }
         Ok(report)
+    }
+
+    /// Adds or replaces by path, so rescanning a directory updates rather than
+    /// duplicating.
+    fn insert(&mut self, entry: IndexedImage) {
+        match self.by_path.get(&entry.path) {
+            Some(&at) => self.entries[at] = entry,
+            None => {
+                self.by_path.insert(entry.path.clone(), self.entries.len());
+                self.entries.push(entry);
+            }
+        }
     }
 
     /// Embeds a query the way CLIP expects, ready to compare against images.
@@ -207,6 +248,53 @@ impl ImageIndex {
         self.entries = entries;
         Ok(self.entries.len())
     }
+}
+
+/// Counts files that look like photos but have no decoder here.
+///
+/// Extension-based, matching how the loader decides what to walk. The list is the
+/// formats a real photo library actually contains, so a user is told what was left
+/// out rather than quietly getting a partial index.
+fn unsupported_image_files(dir: &Path) -> std::collections::BTreeMap<String, usize> {
+    const LOOKS_LIKE_AN_IMAGE: &[&str] = &[
+        "heic", "heif", "webp", "avif", "tif", "tiff", "bmp", "gif", "raw", "dng", "cr2", "cr3",
+        "nef", "arw", "orf", "rw2", "raf",
+    ];
+
+    let mut counts = std::collections::BTreeMap::new();
+    let Ok(entries) = walkdir_files(dir) else {
+        return counts;
+    };
+    for path in entries {
+        let Some(ext) = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+        else {
+            continue;
+        };
+        if LOOKS_LIKE_AN_IMAGE.contains(&ext.as_str()) {
+            *counts.entry(ext).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Every file under `dir`, recursively.
+fn walkdir_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Words from a filename, for keyword matching alongside the vector.
