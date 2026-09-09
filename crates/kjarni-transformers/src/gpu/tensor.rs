@@ -248,15 +248,34 @@ impl GpuTensor {
         // BF16's mantissa loses nothing that matters, and F32 costs twice the VRAM.
         // A 3B model is 12.8GB expanded to F32 and 6.4GB to BF16, and on a 12GB card
         // the F32 copy spills to host memory, which drops decode from ~6 tok/s to 0.2.
-        let source_was_quantised = weights
-            .tensor_dtype(name)
-            .map(|dt| dt.is_quantized())
-            .unwrap_or(false);
-        let target = target_dt.unwrap_or(if source_was_quantised {
+        let source_dt = weights.tensor_dtype(name).ok();
+        let source_was_quantised = source_dt.map(|dt| dt.is_quantized()).unwrap_or(false);
+        let mut target = target_dt.unwrap_or(if source_was_quantised {
             DType::BF16
         } else {
             DType::F32
         });
+
+        // A quantised target means "leave already-quantised weights packed", not
+        // "quantise everything". A `.kjq` decoder asks for Q8_0 globally, yet 121 of
+        // Qwen2.5-0.5B's 290 tensors are stored unquantised -- every layer norm and
+        // attention bias -- and there is no path from f32 to a Q8_0 block here. Those
+        // used to reach the conversion below and fail the whole load with
+        // "unsupported target dtype Q8_0", which read like the kernel was missing.
+        if target.is_quantized() && source_dt != Some(target) {
+            target = if source_was_quantised {
+                DType::BF16
+            } else {
+                DType::F32
+            };
+            log::debug!(
+                "tensor '{}' is {:?} on disk, not {:?}; uploading as {:?}",
+                label,
+                source_dt,
+                target_dt,
+                target
+            );
+        }
 
         log::debug!(
             "converting tensor '{}' to {:?} for GPU upload",

@@ -1,6 +1,6 @@
 use crate::activations::softmax_1d_inplace;
 pub use crate::common::{DecodingStrategy, GenerationConfig};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use ndarray::Array1;
 use ndarray::{ArrayBase, DataMut, Ix1};
 use rand::Rng;
@@ -80,12 +80,26 @@ pub fn apply_repetition_penalty(
 
 pub fn sample_token(mut logits: Array1<f32>, strategy: &DecodingStrategy) -> Result<u32> {
     match strategy {
-        DecodingStrategy::Greedy => Ok(logits
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(idx, _)| idx as u32)
-            .unwrap()),
+        // `partial_cmp` returns `None` for NaN, and unwrapping it turned any upstream
+        // numerical fault into a bare panic with no clue where it came from. A GPU
+        // kernel misreading its weights surfaces here first, so say so.
+        DecodingStrategy::Greedy => {
+            let mut best: Option<(usize, f32)> = None;
+            for (i, &v) in logits.iter().enumerate() {
+                if v.is_nan() {
+                    return Err(anyhow!(
+                        "logit {i} of {} is NaN; the forward pass produced no usable \
+                         distribution",
+                        logits.len()
+                    ));
+                }
+                if best.is_none_or(|(_, b)| v > b) {
+                    best = Some((i, v));
+                }
+            }
+            best.map(|(i, _)| i as u32)
+                .ok_or_else(|| anyhow!("cannot sample from an empty logit vector"))
+        }
         DecodingStrategy::Sample(params) => {
             // Apply filters sequentially
             if let Some(k) = params.top_k {

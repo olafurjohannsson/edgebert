@@ -45,6 +45,9 @@ pub struct GpuSwiGLUFFN {
     fused_bmm_f32: wgpu::ComputePipeline,
     fused_gemv_q4k: wgpu::ComputePipeline,
     fused_bmm_q4k: wgpu::ComputePipeline,
+    /// Fallback for weight dtypes the fused kernels do not read. See `encode`.
+    elementwise_bind_group_layout: wgpu::BindGroupLayout,
+    elementwise_pipeline: wgpu::ComputePipeline,
     linear_layer: GpuLinearLayer,
     context: Arc<WgpuContext>,
 }
@@ -53,7 +56,7 @@ impl GpuSwiGLUFFN {
     pub fn new(context: &Arc<WgpuContext>) -> Result<Self> {
         let device = &context.device;
 
-        let _elementwise_bind_group_layout =
+        let elementwise_bind_group_layout =
             context
                 .device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -91,6 +94,23 @@ impl GpuSwiGLUFFN {
                         },
                     ],
                 });
+
+        let elementwise_shader = device.create_shader_module(wgpu::include_wgsl!("./swiglu.wgsl"));
+        let elementwise_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("SwiGLU Elementwise"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("SwiGLU Elementwise Layout"),
+                        bind_group_layouts: &[&elementwise_bind_group_layout],
+                        push_constant_ranges: &[],
+                    }),
+                ),
+                module: &elementwise_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("./swiglu_fused.wgsl"));
 
@@ -320,6 +340,8 @@ impl GpuSwiGLUFFN {
             fused_bmm_f32: make_pipeline(&layout_f32, "fused_bmm_f32"),
             fused_gemv_q4k: make_pipeline(&layout_q4k, "fused_gemv_q4k"),
             fused_bmm_q4k: make_pipeline(&layout_q4k, "fused_bmm_q4k"),
+            elementwise_bind_group_layout,
+            elementwise_pipeline,
             linear_layer: GpuLinearLayer::new(context),
             context: context.clone(),
         })
@@ -339,14 +361,74 @@ impl GpuSwiGLUFFN {
         let rows = input.shape()[0];
         let intermediate_size = weights.up_proj.shape()[0];
 
-        // Step 1: Fused gate/up projection with SiLU
-        // Output: [rows, intermediate_size]
+        // Step 1: gate/up projection with SiLU. Output: [rows, intermediate_size]
         let intermediate = pool.get(vec![rows, intermediate_size]);
-        self.encode_fused_gate_up(encoder, input, weights, &intermediate);
+
+        // The fused kernels read BF16, F32 and Q4_K only. Anything else -- Q8_0, the
+        // encoding a `.kjq` decoder uses -- would be reinterpreted as bf16 and yield
+        // NaN with no error, so those take the unfused route instead: two ordinary
+        // linear projections through `GpuLinearLayer`, which dispatches on dtype
+        // properly, then the elementwise activation.
+        let dt = weights.gate_proj.dtype();
+        let fused_reads = matches!(dt, DType::BF16 | DType::F32 | DType::Q4_K);
+        if fused_reads {
+            self.encode_fused_gate_up(encoder, input, weights, &intermediate);
+        } else {
+            let gate = pool.get(vec![rows, intermediate_size]);
+            let up = pool.get(vec![rows, intermediate_size]);
+            self.linear_layer
+                .encode(encoder, input, &weights.gate_proj, &gate);
+            self.linear_layer
+                .encode(encoder, input, &weights.up_proj, &up);
+            self.encode_swiglu_elementwise(encoder, &gate, &up, &intermediate);
+        }
 
         self.linear_layer
             .encode(encoder, &intermediate, &weights.down_proj, output);
     }
+    /// `silu(gate) * up`, elementwise. The unfused half of `encode`.
+    fn encode_swiglu_elementwise(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        gate: &GpuTensor,
+        up: &GpuTensor,
+        output: &GpuTensor,
+    ) {
+        let bind_group = self
+            .context
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SwiGLU Elementwise BindGroup"),
+                layout: &self.elementwise_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: gate.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: up.buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: output.buffer().as_entire_binding(),
+                    },
+                ],
+            });
+
+        let elements: usize = output.shape().iter().product();
+        gpu_profile!(
+            self.context,
+            encoder,
+            "SwiGLU elementwise",
+            |pass: &mut wgpu::ComputePass<'_>| {
+                pass.set_pipeline(&self.elementwise_pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups((elements as u32).div_ceil(256), 1, 1);
+            }
+        );
+    }
+
     fn encode_fused_gate_up(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -354,6 +436,17 @@ impl GpuSwiGLUFFN {
         weights: &GpuSwiGLUFFNWeights,
         output: &GpuTensor,
     ) {
+        // The dispatch below falls back to the BF16 bindings for anything it does not
+        // recognise, which reinterprets the bytes rather than failing. `encode` filters
+        // on the same list; this catches a dtype added there and forgotten here.
+        debug_assert!(
+            matches!(
+                weights.gate_proj.dtype(),
+                DType::BF16 | DType::F32 | DType::Q4_K
+            ),
+            "fused SwiGLU cannot read {:?}; route it through the unfused path",
+            weights.gate_proj.dtype()
+        );
         let m = input.shape()[0] as u32;
         let k = input.shape()[1] as u32;
         let n = output.shape()[1] as u32;
