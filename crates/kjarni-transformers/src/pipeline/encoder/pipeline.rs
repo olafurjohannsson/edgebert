@@ -91,7 +91,7 @@ impl EncoderPipeline {
             }
             // `is_gpu` is native-only; on wasm the plan can never select Wgpu because
             // no GPU context can be constructed.
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             Device::Wgpu if !self.embeddings.is_gpu() => {
                 return Err(anyhow!("Plan requires GPU embeddings but not loaded"));
             }

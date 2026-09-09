@@ -23,6 +23,12 @@ struct LinearInfo {
 // shader can index words directly instead of straddling boundaries.
 @group(0) @binding(9) var<storage, read> W_Q6K: array<u32>;
 
+// Q8_0 weights. The on-disk block is 34 bytes -- d (f16) then qs[32] -- which
+// leaves `qs` two bytes out of word alignment, so the upload repacks each block
+// into 9 words: d alone in word 0, then the 32 values as eight clean words. That
+// costs 5.9% of the buffer and buys an aligned `unpack4xI8` per word.
+@group(0) @binding(10) var<storage, read> W_Q8: array<u32>;
+
 // Reduction cache for Wide kernel
 var<workgroup> wg_sum: array<f32, 256>;
 
@@ -376,6 +382,119 @@ fn bmm_q4k(
 
 
 // ---------------------------------------------------------------------------
+// Q8_0 GEMV
+//
+// Repacked block layout, 9 u32 words:
+//   word    0 : d (f16) in the low half
+//   words 1..8: qs[32], four signed 8-bit values per word
+//
+// A block covers 32 weights, so each of the 8 work units per block is one word
+// and four weights. Dequantisation is `d * qs`, matching `dequantize_q8_0_block`.
+// ---------------------------------------------------------------------------
+
+const Q8_WORDS: u32 = 9u;
+
+fn q8_unit_weights(base: u32, jg: u32) -> vec4<f32> {
+    let d = unpack2x16float(W_Q8[base]).x;
+    return vec4<f32>(unpack4xI8(W_Q8[base + 1u + jg])) * d;
+}
+
+@compute @workgroup_size(64)
+fn gemv_q8(
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(num_workgroups) grid: vec3<u32>
+) {
+    let row0 = (wg_id.y * grid.x + wg_id.x) * ROWS_PER_WG;
+    let tid = local_id.x;
+    if (row0 >= info.N) { return; }
+
+    let blocks_per_row = info.K / 32u;
+    let words_per_row = blocks_per_row * Q8_WORDS;
+    let total_units = blocks_per_row * 8u;
+
+    var p0 = 0.0;
+    var p1 = 0.0;
+    var p2 = 0.0;
+    var p3 = 0.0;
+
+    for (var u = tid; u < total_units; u = u + 64u) {
+        let blk = u / 8u;
+        let jg = u % 8u;
+        let ob = blk * 32u + jg * 4u;
+
+        // Loaded once, reused by every row this workgroup owns.
+        let a = vec4<f32>(Input[ob], Input[ob + 1u], Input[ob + 2u], Input[ob + 3u]);
+        let base = row0 * words_per_row + blk * Q8_WORDS;
+
+        p0 += dot(a, q8_unit_weights(base, jg));
+        if (row0 + 1u < info.N) {
+            p1 += dot(a, q8_unit_weights(base + words_per_row, jg));
+        }
+        if (row0 + 2u < info.N) {
+            p2 += dot(a, q8_unit_weights(base + words_per_row * 2u, jg));
+        }
+        if (row0 + 3u < info.N) {
+            p3 += dot(a, q8_unit_weights(base + words_per_row * 3u, jg));
+        }
+    }
+
+    wg_sum4[tid] = vec4<f32>(p0, p1, p2, p3);
+    workgroupBarrier();
+    for (var s = 32u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            wg_sum4[tid] += wg_sum4[tid + s];
+        }
+        workgroupBarrier();
+    }
+    if (tid == 0u) {
+        let r = wg_sum4[0];
+        Output[row0] = r.x;
+        if (row0 + 1u < info.N) { Output[row0 + 1u] = r.y; }
+        if (row0 + 2u < info.N) { Output[row0 + 2u] = r.z; }
+        if (row0 + 3u < info.N) { Output[row0 + 3u] = r.w; }
+    }
+}
+
+// Batched Q8_0: grid is (n, m), one workgroup per output element.
+@compute @workgroup_size(256)
+fn bmm_q8(
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>
+) {
+    let n = wg_id.x;
+    let row = wg_id.y;
+    let tid = local_id.x;
+    if (n >= info.N || row >= info.M) { return; }
+
+    let blocks_per_row = info.K / 32u;
+    let row_base = n * blocks_per_row * Q8_WORDS;
+    let total_units = blocks_per_row * 8u;
+    let input_offset = row * info.K;
+
+    var partial = 0.0;
+    for (var u = tid; u < total_units; u = u + 256u) {
+        let blk = u / 8u;
+        let jg = u % 8u;
+        let ob = input_offset + blk * 32u + jg * 4u;
+
+        let a = vec4<f32>(Input[ob], Input[ob + 1u], Input[ob + 2u], Input[ob + 3u]);
+        partial += dot(a, q8_unit_weights(row_base + blk * Q8_WORDS, jg));
+    }
+
+    wg_sum[tid] = partial;
+    workgroupBarrier();
+    for (var s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            wg_sum[tid] += wg_sum[tid + s];
+        }
+        workgroupBarrier();
+    }
+    if (tid == 0u) {
+        Output[row * info.N + n] = wg_sum[0];
+    }
+}
+
 // Q6_K GEMV
 //
 // Padded block layout, 53 u32 words:

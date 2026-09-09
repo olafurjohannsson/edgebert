@@ -76,7 +76,7 @@ impl DecoderPipeline {
                 return Err(anyhow!("Plan requires CPU embeddings but not loaded"));
             }
             // Native-only check: no wasm plan can select Wgpu.
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             Device::Wgpu if !self.embeddings.is_gpu() => {
                 return Err(anyhow!("Plan requires GPU embeddings but not loaded"));
             }
@@ -100,7 +100,7 @@ impl DecoderPipeline {
                 return Err(anyhow!("Plan requires CPU LM head but not loaded"));
             }
             // Native-only check: no wasm plan can select Wgpu.
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             Device::Wgpu if !self.lm_head.has_gpu() => {
                 return Err(anyhow!("Plan requires GPU LM head but not loaded"));
             }

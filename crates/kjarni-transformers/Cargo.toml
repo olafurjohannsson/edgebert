@@ -52,6 +52,10 @@ windows = { version = "0.58", features = ["Win32_Graphics_Dxgi"] }
 sysinfo = "0.32"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { workspace = true, optional = true, features = [
+    "fragile-send-sync-non-atomic-wasm",
+] }
+futures-intrusive = { workspace = true, optional = true }
 # std::time::Instant panics on this target; see utils::time.
 web-time = "1.1"
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
@@ -84,6 +88,9 @@ approx = "0.5.1"
 tempfile = "3.23.0"
 
 [features]
+# Compile the wgpu compute stack for the browser. Off by default: it pulls
+# wgpu into the wasm graph, and the CPU bundle should not pay for it.
+wasm-gpu = ["dep:wgpu", "dep:futures-intrusive"]
 default = []
 profiling = []
 rubato = []

@@ -264,3 +264,57 @@ async fn kjq8_decoder_loads_and_generates() {
          misread scale looks like: {text:?}"
     );
 }
+
+/// A `.kjq` decoder must load onto the GPU, not just the CPU.
+///
+/// `load_from_kjq` sets `target_dtype = Q8_0` for a KJQ8 container, which is right
+/// for the 169 quantised tensors and wrong for the other 121: Qwen2.5-0.5B stores
+/// every layer norm and attention bias unquantised, and there is no f32-to-Q8_0
+/// path on the upload. Those failed the whole load with "unsupported target dtype
+/// Q8_0 for CPU->GPU conversion", which reads like a missing kernel and is not.
+///
+/// Nothing covered this: the CPU test above passes on the same container, and the
+/// GPU kernels have their own unit tests on synthetic matrices.
+#[tokio::test]
+#[ignore = "GPU required"]
+async fn kjq8_decoder_loads_onto_the_gpu() {
+    use kjarni_models::models::qwen::QwenModel;
+    use kjarni_transformers::WgpuContext;
+    use kjarni_transformers::pipeline::DecoderLoader;
+    use kjarni_transformers::weights::kjq::{self, KjqEncoding};
+
+    let dir = std::env::var("KJARNI_KJQ_DIR").unwrap_or_else(|_| "/tmp/kjq".into());
+    let path = std::path::Path::new(&dir).join("qwen05b-q8.kjq");
+    let Ok(bytes) = std::fs::read(&path) else {
+        eprintln!("skipping: {} not present", path.display());
+        return;
+    };
+
+    let unpacked = kjq::unpack(&bytes).expect("unpack KJQ8");
+    assert_eq!(unpacked.encoding, KjqEncoding::Kjq8);
+
+    let context = WgpuContext::new().await.expect("gpu context");
+    let model: QwenModel =
+        DecoderLoader::load_from_kjq_on(&unpacked, None, None, Some(context.clone()))
+            .expect("KJQ8 decoder loads onto the GPU");
+
+    // Loading is only half of it: a model that builds but cannot run would pass a
+    // construction-only assertion, which is how the CPU-only gap survived.
+    use kjarni_transformers::common::{DecodingStrategy, GenerationConfig};
+    use kjarni_transformers::decoder::generator::DecoderGenerator;
+
+    let generator = DecoderGenerator::new(std::sync::Arc::new(model)).expect("generator");
+    let config = GenerationConfig {
+        max_new_tokens: Some(8),
+        strategy: DecodingStrategy::Greedy,
+        add_bos_token: false,
+        ..Default::default()
+    };
+    let out = generator
+        .generate("The capital of Iceland is", &config, None)
+        .await
+        .expect("generate on the GPU");
+
+    eprintln!("  GPU KJQ8 Qwen generated: {:?}", out.trim());
+    assert!(!out.trim().is_empty(), "GPU decode produced nothing");
+}

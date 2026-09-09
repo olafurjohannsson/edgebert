@@ -4,12 +4,12 @@ use crate::cpu::{
     kernels::q_common::{BlockQ4_K, BlockQ6_K, BlockQ8_0},
     ops,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::tensor::raw_tensor::TensorView;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::WgpuContext;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::gpu::GpuTensor;
 use crate::linear_layer::LinearLayerBuilder;
 use crate::tensor::{DType, QuantizedMatrix};
@@ -18,7 +18,7 @@ use crate::weights::ModelWeights;
 use anyhow::{Result, anyhow};
 use half::bf16;
 use ndarray::{Array1, Array2, ArrayView2};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -446,13 +446,13 @@ impl LinearLayer {
     }
 
     /// Uploads the weight matrix to the GPU.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn to_gpu(&self, ctx: &Arc<WgpuContext>) -> Result<GpuTensor> {
         self.to_gpu_tensor(ctx, "to_gpu")
     }
 
     /// Converts the linear layer's weight matrix to a `GpuTensor`.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn to_gpu_tensor(&self, ctx: &Arc<WgpuContext>, label: &str) -> Result<GpuTensor> {
         match &self.data {
             LinearData::F32(arr) => {
@@ -502,9 +502,12 @@ impl LinearLayer {
                 GpuTensor::from_raw(ctx, &raw_tensor, label)
             }
             LinearData::Q8_0(matrix) => {
+                // Repacked to 9 words per block, the layout the Q8_0 kernels index.
+                // See `repack_q8_0`; shipping the raw 34-byte blocks puts `qs` out of
+                // word alignment and the shader reads garbage.
                 let raw_tensor = TensorView {
                     name: label.to_string(),
-                    bytes: Cow::Borrowed(bytemuck::cast_slice(&matrix.blocks)),
+                    bytes: Cow::Owned(crate::gpu::tensor::repack_q8_0(&matrix.blocks)),
                     shape: matrix.shape.to_vec(),
                     dtype: DType::Q8_0,
                 };

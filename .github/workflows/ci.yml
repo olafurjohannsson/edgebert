@@ -409,6 +409,7 @@ jobs:
         with:
           toolchain: "1.91.1"
           targets: wasm32-unknown-unknown
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasm-check
@@ -421,6 +422,17 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
         run: cargo check -p kjarni-wasm --target wasm32-unknown-unknown --no-default-features
+
+      # The GPU stack is selected by roughly ninety cfg predicates that the
+      # default bundle never compiles. Without this, a wrong one ships green.
+      - name: Check for wasm32 with the GPU stack
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          cargo check -p kjarni-wasm --target wasm32-unknown-unknown \
+            --no-default-features --features wasm-gpu
+          cargo clippy -p kjarni-wasm --target wasm32-unknown-unknown \
+            --no-default-features --features wasm-gpu -- -D warnings
 
   # ─── Browser test (the actual WASM artifact) ────────────────────
   #

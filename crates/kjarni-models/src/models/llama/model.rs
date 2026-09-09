@@ -17,10 +17,10 @@ use kjarni_transformers::traits::{ModelLayout, ModelMetadata};
 use ndarray::{Array2, Array3};
 use tokenizers::Tokenizer;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::models::llama::gpu_decoder::LlamaGpuDecoder;
 use crate::models::llama::{config::LlamaConfig, cpu_decoder::LlamaCpuDecoder};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::gpu::{GpuFrameContext, GpuTensor, cache::GpuKVCache};
 
 use kjarni_transformers::{
@@ -78,7 +78,7 @@ impl DecoderModelFactory for LlamaModel {
                 load_config.target_dtype,
             )?) as Box<dyn CpuDecoder>);
         } else if device.is_gpu() {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             if let Some(ctx) = context {
                 gpu = Some(Box::new(LlamaGpuDecoder::new(
                     ctx,
@@ -89,7 +89,7 @@ impl DecoderModelFactory for LlamaModel {
                     load_config,
                 )?) as Box<dyn GpuDecoder>);
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
             return Err(anyhow!("GPU decoding is not available in WebAssembly"));
         } else {
             log::error!("Invalid device");
@@ -185,7 +185,7 @@ impl InferenceModel for LlamaModel {
         self.pipeline.plan().layers
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn context(&self) -> Option<Arc<WgpuContext>> {
         self.pipeline.context().cloned()
     }
@@ -224,7 +224,7 @@ impl LanguageModel for LlamaModel {
                 )))
             }
             // No GPU cache without a GPU context, which wasm cannot build.
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             Device::Wgpu => {
                 let context = self
                     .context()
@@ -239,7 +239,7 @@ impl LanguageModel for LlamaModel {
                     effective_max_len,
                 )?))
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
             Device::Wgpu => Err(anyhow::anyhow!("GPU cache is not available in WebAssembly")),
         }
     }
@@ -323,7 +323,7 @@ impl CpuDecoderOps for LlamaModel {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 impl GpuDecoderOps for LlamaModel {
     fn decoder(&self) -> &dyn GpuDecoder {
         self.pipeline
@@ -357,6 +357,17 @@ impl GpuDecoderOps for LlamaModel {
             (false, true) => {
                 // CPU fallback - sync read/write
                 log::debug!("Using CPU fallback for LM head projection");
+                // A browser cannot take this path: the readback below completes on the event
+                // loop, and `block_on` is what would be blocking it. Hanging the tab is worse
+                // than refusing, so refuse and let the caller pick a device.
+                #[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+                return Err(anyhow!(
+                    "the LM head is on the CPU while the decoder is on the GPU, which needs a \
+                     blocking GPU readback that a browser cannot perform. Load the LM head onto \
+                     the GPU, or run the decoder on the CPU."
+                ));
+
+                #[cfg(not(all(target_arch = "wasm32", feature = "wasm-gpu")))]
                 pollster::block_on(async {
                     let hidden_cpu = hidden_states.to_ndarray_3d().await?;
                     let logits_cpu = lm_head.forward_cpu(&hidden_cpu)?;
@@ -378,7 +389,7 @@ impl DecoderLanguageModel for LlamaModel {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn decoder_gpu_ops(&self) -> Option<&dyn GpuDecoderOps> {
         if self.pipeline.gpu_decoder().is_some() {
             Some(self)

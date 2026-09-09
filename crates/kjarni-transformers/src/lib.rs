@@ -18,9 +18,9 @@ pub mod common;
 pub mod decoder;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod encoder_decoder;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 pub mod gpu;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 pub mod gpu_ops;
 
 pub mod linear_layer;
@@ -89,7 +89,7 @@ pub mod prelude {
 
 pub use cache::{Cache, CpuKVCache};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 pub use gpu_ops::context::WgpuContext;
 
 /// Placeholder GPU context for wasm builds.
@@ -98,7 +98,7 @@ pub use gpu_ops::context::WgpuContext;
 /// and an empty enum lets that field exist while making a `Some(..)` value
 /// impossible to construct. See `cpu::encoder::traits::GpuEncoder` for the same
 /// reasoning applied to the encoder traits.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
 pub enum WgpuContext {}
 
 pub use models::{LanguageModel, ModelArchitecture, ModelType};

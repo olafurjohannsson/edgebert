@@ -15,6 +15,11 @@ exclude = ["pkg/", "ts/", "plugins/", "tests/browser/node_modules/", "scripts/__
 
 [features]
 default = []  # No OpenBLAS by default
+
+# Run the encoder on the browser's WebGPU adapter instead of the CPU. Off by
+# default: it pulls wgpu into the bundle, and the CPU build should not pay for
+# it. Requires a browser with WebGPU.
+wasm-gpu = ["kjarni-models/wasm-gpu", "kjarni-transformers/wasm-gpu"]
 openblas = ["dep:blas-src", "dep:openblas-src", "ndarray/blas"]
 
 [dependencies]

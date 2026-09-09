@@ -1,7 +1,7 @@
 //! Base traits and types for language model inference.
 
 use crate::Cache;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::gpu::GpuTensor;
 pub use crate::tensor::DType;
 use crate::traits::InferenceModel;
@@ -64,14 +64,14 @@ pub enum AutoregressiveLoop {
 #[derive(Debug)]
 pub enum ModelInput<'a> {
     /// Token IDs stored in GPU memory.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     TokensGpu(&'a GpuTensor),
 
     /// Token IDs stored in CPU memory.
     TokensCpu(ndarray::ArrayView2<'a, u32>),
 
     /// Pre-computed hidden states stored in GPU memory.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     HiddenGpu(&'a GpuTensor),
 
     /// Pre-computed hidden states stored in CPU memory.
@@ -91,7 +91,7 @@ impl<'a> ModelInput<'a> {
     }
 
     /// Creates a `ModelInput` from a GPU tensor of token IDs.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn from_gpu_tokens(tensor: &'a GpuTensor) -> Self {
         ModelInput::TokensGpu(tensor)
     }
@@ -102,7 +102,7 @@ impl<'a> ModelInput<'a> {
     }
 
     /// Creates a `ModelInput` from pre-computed GPU hidden states.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn from_gpu_hidden(tensor: &'a GpuTensor) -> Self {
         ModelInput::HiddenGpu(tensor)
     }
@@ -110,10 +110,10 @@ impl<'a> ModelInput<'a> {
     /// Returns the batch size.
     pub fn batch_size(&self) -> usize {
         match self {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             ModelInput::TokensGpu(t) => t.shape()[0],
             ModelInput::TokensCpu(a) => a.shape()[0],
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             ModelInput::HiddenGpu(t) => t.shape()[0],
             ModelInput::HiddenCpu(a) => a.shape()[0],
         }
@@ -122,35 +122,35 @@ impl<'a> ModelInput<'a> {
     /// Returns the sequence length.
     pub fn seq_len(&self) -> usize {
         match self {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             ModelInput::TokensGpu(t) => t.shape()[1],
             ModelInput::TokensCpu(a) => a.shape()[1],
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             ModelInput::HiddenGpu(t) => t.shape()[1],
             ModelInput::HiddenCpu(a) => a.shape()[1],
         }
     }
 
     /// Returns true if this is a token input (vs hidden states).
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn is_tokens(&self) -> bool {
         matches!(self, ModelInput::TokensGpu(_) | ModelInput::TokensCpu(_))
     }
 
     /// Returns true if this is a token input (vs hidden states).
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
     pub fn is_tokens(&self) -> bool {
         matches!(self, ModelInput::TokensCpu(_))
     }
 
     /// Returns true if this input is on the GPU.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn is_gpu(&self) -> bool {
         matches!(self, ModelInput::TokensGpu(_) | ModelInput::HiddenGpu(_))
     }
 
     /// Returns true if this input is on the GPU.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
     pub fn is_gpu(&self) -> bool {
         false
     }

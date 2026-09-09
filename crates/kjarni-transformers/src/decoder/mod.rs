@@ -2,14 +2,14 @@ pub mod backend;
 pub mod generator;
 pub mod traits;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 mod gpu;
 
 pub mod prelude {
     pub use crate::cpu::decoder::{
         CpuDecoderBackend, CpuRoPEDecoderLayer, DecoderAttention, DecoderLayer,
     };
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub use crate::decoder::gpu::{GpuPreNormDecoderLayer, GpuRoPEDecoderLayer};
     pub use crate::decoder::{
         backend::AnyDecoderBackend,
@@ -19,7 +19,7 @@ pub mod prelude {
             GpuDecoderOps,
         },
     };
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub use crate::gpu::decoder::backend::GpuDecoderBackend;
 }
 

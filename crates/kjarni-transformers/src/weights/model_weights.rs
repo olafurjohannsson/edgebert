@@ -291,7 +291,7 @@ impl ModelWeights {
     /// Returns a typed CPU tensor. Prefer `with_raw_tensor` for large tensors.
     #[cfg(target_arch = "wasm32")]
     pub fn get_typed_tensor(&self, name: &str) -> Result<CpuTensor> {
-        self.with_raw_tensor(name, |raw| raw_to_typed(raw))
+        self.with_raw_tensor(name, raw_to_typed)
     }
 
     /// Returns a 1D f32 array. Only use for small tensors like biases.

@@ -269,6 +269,30 @@ impl EncoderLoader {
         load_config: Option<ModelLoadConfig>,
         model_type: Option<ModelType>,
     ) -> Result<M> {
+        Self::load_from_bytes_with_context(
+            safetensors_data,
+            config_json,
+            tokenizer_json,
+            None,
+            load_config,
+            model_type,
+        )
+    }
+
+    /// Load from raw bytes onto a caller-supplied GPU context.
+    ///
+    /// The browser counterpart to the context argument on `load_from_pretrained`.
+    /// wasm has no filesystem, so the weights still arrive as bytes, but which
+    /// device the encoder runs on becomes the caller's choice instead of always
+    /// being the CPU. Passing `None` is exactly `load_from_bytes`.
+    pub fn load_from_bytes_with_context<M: EncoderModelFactory>(
+        safetensors_data: &[u8],
+        config_json: &str,
+        tokenizer_json: &[u8],
+        context: Option<Arc<WgpuContext>>,
+        load_config: Option<ModelLoadConfig>,
+        model_type: Option<ModelType>,
+    ) -> Result<M> {
         let weights = ModelWeights::from_safetensors_bytes(safetensors_data, config_json)?;
         let load_config = load_config.unwrap_or_default();
 
@@ -296,9 +320,21 @@ impl EncoderLoader {
             ..Default::default()
         }));
 
-        // WASM is always CPU, no GPU context
-        let (cpu_encoder, gpu_encoder) =
-            M::build_backends(&weights, &meta, &layout, load_config, None, Device::Cpu)?;
+        // A context is the only signal for which device to use: the caller either
+        // handed one over or it did not.
+        let device = if context.is_some() {
+            Device::Wgpu
+        } else {
+            Device::Cpu
+        };
+        let (cpu_encoder, gpu_encoder) = M::build_backends(
+            &weights,
+            &meta,
+            &layout,
+            load_config,
+            context.as_ref(),
+            device,
+        )?;
 
         let cpu_head = M::build_head(&weights, &load_config)?;
 
@@ -307,6 +343,7 @@ impl EncoderLoader {
             .with_backends(cpu_encoder, gpu_encoder)
             .with_head(cpu_head)
             .with_pooling_strategy(M::pooling_strategy())
+            .with_context(context)
             .build()?;
 
         Ok(M::new_from_pipeline(

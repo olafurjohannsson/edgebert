@@ -10,10 +10,10 @@ use ndarray::{Array2, Array3};
 use tokenizers::Tokenizer;
 
 use crate::models::llama::cpu_decoder::LlamaCpuDecoder;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::models::llama::gpu_decoder::LlamaGpuDecoder;
 use crate::models::qwen::config::QwenConfig;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::gpu::{GpuFrameContext, GpuTensor, cache::GpuKVCache};
 
 use kjarni_transformers::{
@@ -71,7 +71,7 @@ impl DecoderModelFactory for QwenModel {
                 load_config.target_dtype,
             )?) as Box<dyn CpuDecoder>);
         } else if device.is_gpu() {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             if let Some(ctx) = context {
                 gpu = Some(Box::new(LlamaGpuDecoder::new(
                     ctx,
@@ -82,7 +82,7 @@ impl DecoderModelFactory for QwenModel {
                     load_config,
                 )?) as Box<dyn GpuDecoder>);
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
             return Err(anyhow!("GPU decoding is not available in WebAssembly"));
         } else {
             log::error!("Invalid device in QwenModel");
@@ -158,7 +158,7 @@ impl InferenceModel for QwenModel {
     fn device(&self) -> kjarni_transformers::prelude::Device {
         self.pipeline.plan().layers
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn context(&self) -> Option<Arc<WgpuContext>> {
         self.pipeline.context().cloned()
     }
@@ -186,7 +186,7 @@ impl LanguageModel for QwenModel {
                 )))
             }
             // No GPU cache without a GPU context, which wasm cannot build.
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             kjarni_transformers::prelude::Device::Wgpu => {
                 let ctx = self
                     .context()
@@ -200,7 +200,7 @@ impl LanguageModel for QwenModel {
                     max_len,
                 )?))
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
             kjarni_transformers::prelude::Device::Wgpu => {
                 Err(anyhow!("GPU cache is not available in WebAssembly"))
             }
@@ -269,7 +269,7 @@ impl DecoderLanguageModel for QwenModel {
             None
         }
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn decoder_gpu_ops(&self) -> Option<&dyn GpuDecoderOps> {
         if self.pipeline.gpu_decoder().is_some() {
             Some(self)
@@ -325,7 +325,7 @@ impl CpuDecoderOps for QwenModel {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 impl GpuDecoderOps for QwenModel {
     fn decoder(&self) -> &dyn GpuDecoder {
         self.pipeline.gpu_decoder().unwrap()
@@ -346,7 +346,17 @@ impl GpuDecoderOps for QwenModel {
             let (enc, pool) = ctx.resources();
             lm.forward_gpu(enc, pool, h)
         } else {
-            // Fallback
+            // A browser cannot take this path: the readback below completes on the
+            // event loop, and `block_on` is what would be blocking it. Hanging the
+            // tab is worse than refusing, so refuse and let the caller pick a device.
+            #[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+            return Err(anyhow!(
+                "the LM head is on the CPU while the decoder is on the GPU, which \
+                 needs a blocking GPU readback that a browser cannot perform. Load \
+                 the LM head onto the GPU, or run the decoder on the CPU."
+            ));
+
+            #[cfg(not(all(target_arch = "wasm32", feature = "wasm-gpu")))]
             pollster::block_on(async {
                 let h_cpu = h.to_ndarray_3d().await?;
                 let logits = lm.forward_cpu(&h_cpu)?;

@@ -68,6 +68,9 @@ workspace = true
 [features]
 default = []
 
+# Compile the GPU stack for the browser. Forwards to the engine's own gate.
+wasm-gpu = ["kjarni-transformers/wasm-gpu"]
+
 # Decode JPEG and PNG from bytes. Without it the CLIP vision tower still works,
 # it just takes raw RGB from the caller, which is what an FFI or WASM host
 # usually already has. With it, `kjarni index` can walk a photo directory.

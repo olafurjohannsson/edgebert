@@ -7,15 +7,15 @@ use crate::cache::Cache;
 use crate::common::GenerationConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::encoder_decoder::traits::GpuCrossAttentionKVCache;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::gpu::{GpuFrameContext, GpuKVCache, GpuTensor, GpuTensorPool};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::models::base::ModelInput;
 use crate::models::base::{AutoregressiveLoop, LanguageModel};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use ndarray::{Array1, Array2, Array3};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use wgpu::CommandEncoder;
 
 /// Defines the generation loop.
@@ -70,10 +70,10 @@ pub trait DecoderGenerationBackend: Send + Sync {
 /// those compiling against a value that can only ever be `None`, which is far less
 /// invasive than threading `#[cfg]` through the pipeline. Mirrors what
 /// `cpu::encoder::traits::GpuEncoder` does for the encoder path.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
 pub trait GpuDecoder: Send + Sync {}
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 pub trait GpuDecoder: Send + Sync {
     fn as_any(&self) -> &dyn std::any::Any;
 
@@ -122,6 +122,7 @@ pub trait GpuDecoder: Send + Sync {
         end_layer: usize,
     ) -> Result<GpuTensor>;
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn forward_layers2(
         &self,
         _cmd_encoder: &mut CommandEncoder,
@@ -138,6 +139,7 @@ pub trait GpuDecoder: Send + Sync {
         unimplemented!()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn precompute_cross_attention_kv(
         &self,
         _cmd_encoder: &mut CommandEncoder,
@@ -284,10 +286,10 @@ pub trait CpuDecoderOps: Send + Sync {
 /// those compiling against a value that can only ever be `None`, which is far less
 /// invasive than threading `#[cfg]` through the pipeline. Mirrors what
 /// `cpu::encoder::traits::GpuEncoder` does for the encoder path.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
 pub trait GpuDecoderOps: Send + Sync {}
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 pub trait GpuDecoderOps: Send + Sync {
     /// Access the underlying GPU compute component.
     fn decoder(&self) -> &dyn GpuDecoder;
@@ -315,7 +317,7 @@ pub trait DecoderLanguageModel: LanguageModel {
     fn decoder_cpu_ops(&self) -> Option<&dyn CpuDecoderOps>;
 
     /// Access GPU operations strategy. Returns `None` if model is CPU-only.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn decoder_gpu_ops(&self) -> Option<&dyn GpuDecoderOps>;
 
     /// Specifies the generation loop strategy (e.g., Pipelined vs Legacy).

@@ -2,9 +2,9 @@
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::gpu::{GpuFrameContext, GpuTensor, GpuTensorPool};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::models::base::ModelInput;
 // Filesystem paths are a native-only concern: the wasm builds load from bytes.
 #[cfg(not(target_arch = "wasm32"))]
@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokenizers::Tokenizer;
 
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::cpu::encoder::traits::GpuEncoderOps;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::gpu::encoder::GpuTransformerEncoder;
 #[cfg(not(target_arch = "wasm32"))]
 use kjarni_transformers::pipeline::EncoderLoader;
@@ -87,7 +87,7 @@ impl EncoderModelFactory for CrossEncoder {
                     load_config,
                 )?) as Box<dyn CpuEncoder>);
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             Device::Wgpu => {
                 let ctx = context.ok_or_else(|| anyhow!("GPU context required"))?;
                 gpu = Some(Box::new(GpuTransformerEncoder::new(
@@ -100,7 +100,7 @@ impl EncoderModelFactory for CrossEncoder {
             }
             // No GPU backend exists on wasm, and no context can be built,
             // so this arm is unreachable rather than merely unsupported.
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
             Device::Wgpu => {
                 return Err(anyhow!("GPU inference is not available in WebAssembly"));
             }
@@ -145,7 +145,7 @@ impl CrossEncoder {
     /// Extracted from the inference path so the wasm build has something to call:
     /// the GPU tensor types do not exist there, so the body cannot simply be
     /// `#[cfg]`-ed out of the middle of an `else if` chain.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     async fn forward_gpu(
         &self,
         input_ids: &ndarray::Array2<u32>,
@@ -185,7 +185,7 @@ impl CrossEncoder {
     }
 
     /// No GPU backend exists in WebAssembly, so the CPU path is the only path.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
     async fn forward_gpu(
         &self,
         _input_ids: &ndarray::Array2<u32>,
@@ -385,7 +385,7 @@ impl InferenceModel for CrossEncoder {
     fn device(&self) -> Device {
         self.pipeline.plan().layers
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn context(&self) -> Option<Arc<WgpuContext>> {
         self.pipeline.context().cloned()
     }
@@ -412,7 +412,7 @@ impl CpuEncoderOps for CrossEncoder {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 impl GpuEncoderOps for CrossEncoder {
     fn encoder(&self) -> &dyn GpuEncoder {
         self.pipeline
@@ -442,7 +442,7 @@ impl EncoderLanguageModel for CrossEncoder {
             None
         }
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn encoder_gpu_ops(&self) -> Option<&dyn GpuEncoderOps> {
         if self.pipeline.gpu_encoder().is_some() {
             Some(self)

@@ -87,7 +87,7 @@ impl<'a> DecoderPipelineBuilder<'a> {
             plan.embeddings == Device::Wgpu || (tied_weights && plan.lm_head == Device::Wgpu);
         // The wasm constructor takes no context and no device flags: CPU is the only
         // path there.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
         let embeddings = LoadedEmbeddings::new(
             ctx,
             self.weights,
@@ -99,7 +99,7 @@ impl<'a> DecoderPipelineBuilder<'a> {
             emb_load_gpu,
             target_dt,
         )?;
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
         let embeddings = {
             let _ = (emb_load_cpu, emb_load_gpu);
             LoadedEmbeddings::new(
@@ -133,14 +133,14 @@ impl<'a> DecoderPipelineBuilder<'a> {
         // decode. When the tensor is still quantised on disk the head is loaded from
         // it directly instead. That is one extra copy of the quantised table, which
         // is small precisely because it is quantised.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
         let tied_head_is_quantised = tied_weights
             && self
                 .weights
                 .tensor_dtype(&layout.lm_head)
                 .is_ok_and(|dt| dt.is_quantized());
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
         let lm_head = if tied_weights && !tied_head_is_quantised {
             log::info!("Using tied weights between embeddings and LM head");
             LoadedLMHead::from_shared_weights(
@@ -168,7 +168,7 @@ impl<'a> DecoderPipelineBuilder<'a> {
                 self.load_config.quantize_lm_head,
             )?
         };
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
         let lm_head = LoadedLMHead::new(
             self.weights,
             None,
