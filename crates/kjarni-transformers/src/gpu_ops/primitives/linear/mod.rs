@@ -24,6 +24,8 @@ pub struct GpuLinearLayer {
     bmm_q4k: wgpu::ComputePipeline,
     gemv_q6k: wgpu::ComputePipeline,
     bmm_q6k: wgpu::ComputePipeline,
+    gemv_q8: wgpu::ComputePipeline,
+    bmm_q8: wgpu::ComputePipeline,
     bmm_f32: wgpu::ComputePipeline,
     bmm_bf16: wgpu::ComputePipeline,
 
@@ -74,6 +76,17 @@ impl GpuLinearLayer {
                 // 3: B_BF16 (Weights)
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // 10: B_Q8 (Weights, repacked to 36 bytes per block)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -152,6 +165,8 @@ impl GpuLinearLayer {
             bmm_q4k: make_pipeline("bmm_q4k"),
             gemv_q6k: make_pipeline("gemv_q6k"),
             bmm_q6k: make_pipeline("bmm_q6k"),
+            gemv_q8: make_pipeline("gemv_q8"),
+            bmm_q8: make_pipeline("bmm_q8"),
             bmm_f32: make_pipeline("bmm_f32"),
             bmm_bf16: make_pipeline("bmm_bf16"),
             buffer,
@@ -177,8 +192,10 @@ impl GpuLinearLayer {
         // keeps them packed when it can guarantee decode.
         let is_q4k = weights.dtype() == DType::Q4_K;
         let is_q6k = weights.dtype() == DType::Q6_K;
+        let is_q8 = weights.dtype() == DType::Q8_0;
         let use_q4k_kernel = is_gemv && is_q4k;
         let use_q6k_kernel = is_gemv && is_q6k;
+        let use_q8_kernel = is_gemv && is_q8;
         let use_wide_kernel = is_gemv && is_bf16 && n >= 128;
 
         let pipeline = if use_q4k_kernel {
@@ -189,6 +206,10 @@ impl GpuLinearLayer {
             &self.gemv_q6k
         } else if is_q6k {
             &self.bmm_q6k
+        } else if use_q8_kernel {
+            &self.gemv_q8
+        } else if is_q8 {
+            &self.bmm_q8
         } else if use_wide_kernel {
             &self.gemv_bf16_wide
         } else {
@@ -210,14 +231,21 @@ impl GpuLinearLayer {
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
 
-        let (b_f32, b_bf16, b_q4k, b_q6k) = if is_q4k {
-            (&self.buffer, &self.buffer, weights.buffer(), &self.buffer)
+        let (b_f32, b_bf16, b_q4k, b_q6k, b_q8) = if is_q4k {
+            let b = &self.buffer;
+            (b, b, weights.buffer(), b, b)
         } else if is_q6k {
-            (&self.buffer, &self.buffer, &self.buffer, weights.buffer())
+            let b = &self.buffer;
+            (b, b, b, weights.buffer(), b)
+        } else if is_q8 {
+            let b = &self.buffer;
+            (b, b, b, b, weights.buffer())
         } else if is_bf16 {
-            (&self.buffer, weights.buffer(), &self.buffer, &self.buffer)
+            let b = &self.buffer;
+            (b, weights.buffer(), b, b, b)
         } else {
-            (weights.buffer(), &self.buffer, &self.buffer, &self.buffer)
+            let b = &self.buffer;
+            (weights.buffer(), b, b, b, b)
         };
 
         let bind_group = self
@@ -255,6 +283,10 @@ impl GpuLinearLayer {
                         binding: 9,
                         resource: b_q6k.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: b_q8.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -268,7 +300,7 @@ impl GpuLinearLayer {
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &bind_group, &[]);
 
-                if use_q4k_kernel || use_q6k_kernel {
+                if use_q4k_kernel || use_q6k_kernel || use_q8_kernel {
                     // Each workgroup produces 4 output rows.
                     let rows = n.div_ceil(4);
                     let max_dim = 65535;
@@ -291,7 +323,7 @@ impl GpuLinearLayer {
                     // Standard GEMV: 1 Thread per Output Neuron
                     let groups = n.div_ceil(256);
                     pass.dispatch_workgroups(groups, 1, 1);
-                } else if is_q4k || is_q6k {
+                } else if is_q4k || is_q6k || is_q8 {
                     // One workgroup reduces one output element.
                     pass.dispatch_workgroups(n, m, 1);
                 } else {

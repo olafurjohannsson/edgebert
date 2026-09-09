@@ -184,7 +184,7 @@ impl InferenceModel for Gpt2Model {
     fn device(&self) -> Device {
         self.device
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn context(&self) -> Option<Arc<WgpuContext>> {
         self.context.clone()
     }
@@ -293,7 +293,7 @@ impl CpuDecoderOps for Gpt2Model {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 impl GpuDecoderOps for Gpt2Model {
     fn decoder(&self) -> &dyn GpuDecoder {
         self.gpu_decoder
@@ -347,7 +347,7 @@ impl DecoderLanguageModel for Gpt2Model {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn decoder_gpu_ops(&self) -> Option<&dyn GpuDecoderOps> {
         if self.device == Device::Wgpu {
             Some(self)

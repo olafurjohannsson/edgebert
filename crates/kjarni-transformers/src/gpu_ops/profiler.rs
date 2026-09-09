@@ -30,7 +30,9 @@ macro_rules! gpu_profile {
 }
 
 pub struct GpuProfiler {
-    query_set: wgpu::QuerySet,
+    /// `None` when the adapter has no timestamp queries, which is the normal
+    /// case in a browser: WebGPU keeps them behind a developer flag.
+    query_set: Option<wgpu::QuerySet>,
     resolve_buffer: wgpu::Buffer,
     destination_buffer: wgpu::Buffer,
     labels: Mutex<Vec<String>>,
@@ -38,11 +40,13 @@ pub struct GpuProfiler {
 }
 
 impl GpuProfiler {
-    pub fn new(device: &wgpu::Device, max_queries: u32) -> Self {
-        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
-            label: Some("Profiler Query Set"),
-            ty: wgpu::QueryType::Timestamp,
-            count: max_queries,
+    pub fn new(device: &wgpu::Device, max_queries: u32, timestamps: bool) -> Self {
+        let query_set = timestamps.then(|| {
+            device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("Profiler Query Set"),
+                ty: wgpu::QueryType::Timestamp,
+                count: max_queries,
+            })
         });
 
         let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -78,6 +82,15 @@ impl GpuProfiler {
         let mut labels = self.labels.lock().unwrap();
         let index = labels.len() as u32 * 2;
 
+        let Some(query_set) = self.query_set.as_ref() else {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(label),
+                timestamp_writes: None,
+            });
+            callback(&mut pass);
+            return;
+        };
+
         if index + 2 > self.max_queries {
             // Buffer full, just run without profiling
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -93,7 +106,7 @@ impl GpuProfiler {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(label),
             timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
-                query_set: &self.query_set,
+                query_set,
                 beginning_of_pass_write_index: Some(index),
                 end_of_pass_write_index: Some(index + 1),
             }),
@@ -105,11 +118,14 @@ impl GpuProfiler {
     /// Prepares buffers for reading (Must call before resolve)
     pub fn process_results(&self, encoder: &mut wgpu::CommandEncoder) {
         let count = { self.labels.lock().unwrap().len() as u32 * 2 };
+        let Some(query_set) = self.query_set.as_ref() else {
+            return;
+        };
         if count == 0 {
             return;
         }
 
-        encoder.resolve_query_set(&self.query_set, 0..count, &self.resolve_buffer, 0);
+        encoder.resolve_query_set(query_set, 0..count, &self.resolve_buffer, 0);
 
         encoder.copy_buffer_to_buffer(
             &self.resolve_buffer,
@@ -135,10 +151,7 @@ impl GpuProfiler {
         let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
         slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
 
-        match context.device.poll(wgpu::PollType::wait_indefinitely()) {
-            Ok(status) => log::debug!("GPU Poll OK: {:?}", status),
-            Err(e) => panic!("GPU Poll Failed: {:?}", e), // remove panic?
-        }
+        crate::gpu_ops::context::drain(&context.device);
         rx.receive().await.unwrap().expect("RX ERROR"); // TODO: do better
 
         let data = slice.get_mapped_range();

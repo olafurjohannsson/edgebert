@@ -31,10 +31,7 @@ pub async fn read_buffer_2d(
     let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
     buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
 
-    match context.device.poll(wgpu::PollType::wait_indefinitely()) {
-        Ok(status) => log::debug!("GPU poll ok: {:?}", status),
-        Err(e) => panic!("GPU poll failed: {:?}", e),
-    }
+    crate::gpu_ops::context::drain(&context.device);
 
     if let Some(Ok(())) = receiver.receive().await {
         let data = buffer_slice.get_mapped_range();
@@ -77,10 +74,7 @@ pub async fn read_buffer_3d(
     let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
     buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
 
-    match context.device.poll(wgpu::PollType::wait_indefinitely()) {
-        Ok(status) => log::debug!("GPU poll ok: {:?}", status),
-        Err(e) => panic!("GPU poll failed: {:?}", e),
-    }
+    crate::gpu_ops::context::drain(&context.device);
 
     if let Some(Ok(())) = receiver.receive().await {
         let data = buffer_slice.get_mapped_range();

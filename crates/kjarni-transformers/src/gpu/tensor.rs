@@ -171,6 +171,24 @@ impl GpuTensor {
             return GpuTensor::from_raw(ctx, &view, label);
         }
 
+        // Q8_0 reads packed too, but its 34-byte block puts `qs` two bytes out of
+        // word alignment, so a straight copy would make the shader reassemble every
+        // value across a word boundary. Repacking to 9 words -- d alone, then the 32
+        // values as eight whole words -- costs 5.9% of the buffer and lets the kernel
+        // use one aligned `unpack4xI8` per word.
+        if weights.tensor_dtype(name).ok() == Some(DType::Q8_0)
+            && target_dt.is_none_or(|t| t == DType::Q8_0)
+            && let CpuTensor::Q8_0(matrix) = weights.get_typed_tensor(name)?
+        {
+            let view = TensorView {
+                name: name.to_string(),
+                bytes: Cow::Owned(repack_q8_0(&matrix.blocks)),
+                shape: matrix.shape.to_vec(),
+                dtype: DType::Q8_0,
+            };
+            return GpuTensor::from_raw(ctx, &view, label);
+        }
+
         // Q6_K likewise reads packed, but its 210-byte block is not a multiple of
         // four, so each block is padded to 212 on the way up. That costs 0.95% of the
         // buffer and lets the shader index whole words instead of reassembling values
@@ -703,10 +721,7 @@ impl GpuTensor {
             let _ = tx.send(result);
         });
 
-        match device.poll(wgpu::PollType::wait_indefinitely()) {
-            Ok(status) => log::debug!("GPU poll ok: {:?}", status),
-            Err(e) => panic!("GPU poll failed: {:?}", e),
-        }
+        crate::gpu_ops::context::drain(device);
 
         rx.receive()
             .await
@@ -754,6 +769,23 @@ impl GpuTensor {
             DType::Q5_K => "q5_k",
         }
     }
+}
+
+/// Repack `BlockQ8_0` for the GPU: 34 packed bytes become 9 words.
+///
+/// The scale moves into a word of its own so the 32 quantised values start on a
+/// word boundary. See the Q8_0 kernels in `linear.wgsl`, which index this layout
+/// directly.
+pub(crate) fn repack_q8_0(blocks: &[crate::cpu::kernels::q_common::BlockQ8_0]) -> Vec<u8> {
+    const DST: usize = 36;
+    let mut out = vec![0u8; blocks.len() * DST];
+    for (i, b) in blocks.iter().enumerate() {
+        let o = i * DST;
+        out[o..o + 2].copy_from_slice(&b.d.to_bits().to_le_bytes());
+        // Bytes 2 and 3 stay zero: the shader reads only the low half of word 0.
+        out[o + 4..o + 36].copy_from_slice(bytemuck::cast_slice(&b.qs));
+    }
+    out
 }
 
 fn convert_cpu_tensor_to_bytes(

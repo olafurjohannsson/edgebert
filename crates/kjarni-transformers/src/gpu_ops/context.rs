@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use tokio::sync::Mutex;
 use wgpu::{
     Adapter, DeviceDescriptor, Features, Instance, InstanceDescriptor, Limits, PowerPreference,
@@ -50,6 +50,13 @@ pub struct WgpuContext {
     pub uniform_arena: GpuUniformBuffer,
 }
 
+/// The largest workgroup any shader in the crate declares, `(32, 32, 1)`.
+///
+/// A device request that asks for less than this succeeds, and the oversized
+/// pipelines then fail to build without stopping the dispatch, so the output is
+/// silently NaN. Checked up front instead.
+const REQUIRED_INVOCATIONS: u32 = 1024;
+
 impl WgpuContext {
     pub async fn new() -> Result<Arc<Self>> {
         Self::with_config(GpuConfig::default()).await
@@ -66,8 +73,11 @@ impl WgpuContext {
             ..Default::default()
         });
 
-        let required_features =
-            Features::TIMESTAMP_QUERY | Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        // Requested, never required. A browser exposes timestamp queries only
+        // behind a developer flag, and demanding them makes `request_device` fail
+        // outright rather than merely losing the profiler.
+        const WANTED: Features =
+            Features::TIMESTAMP_QUERY.union(Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
 
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
@@ -79,6 +89,11 @@ impl WgpuContext {
 
         let _adapter_info = adapter.get_info();
         let adapter_limits = adapter.limits();
+        let required_features = WANTED & adapter.features();
+        let timestamps = required_features.contains(Features::TIMESTAMP_QUERY);
+        if !timestamps {
+            log::info!("adapter has no timestamp queries; GPU profiling is disabled");
+        }
 
         log::info!(
             "Adapter reported limits: max_storage_buffer_binding_size={} ({:.2}MB), max_buffer_size={} ({:.2}GB)",
@@ -87,6 +102,19 @@ impl WgpuContext {
             adapter_limits.max_buffer_size,
             adapter_limits.max_buffer_size as f64 / 1_073_741_824.0,
         );
+
+        // Five shader entry points declare more than 256 invocations per workgroup:
+        // two at (32, 32, 1), two at (512, 1, 1) and one at (8, 8, 8). WebGPU only
+        // guarantees 256, and an adapter at that floor does not fail loudly. It
+        // produces NaN, which is far worse than refusing, so refuse.
+        if adapter_limits.max_compute_invocations_per_workgroup < REQUIRED_INVOCATIONS {
+            return Err(anyhow!(
+                "adapter grants {} compute invocations per workgroup; kjarni needs {}. \
+                 Its shaders cannot run here, so use the CPU backend instead.",
+                adapter_limits.max_compute_invocations_per_workgroup,
+                REQUIRED_INVOCATIONS,
+            ));
+        }
 
         let memory_info = Self::calculate_memory_info(&adapter, &config)?;
         memory_info.print_summary();
@@ -106,9 +134,11 @@ impl WgpuContext {
             max_buffer_size: memory_info.max_buffer_size,
             max_storage_buffer_binding_size: memory_info.max_storage_buffer_binding_size,
             max_texture_dimension_2d: memory_info.max_texture_dimension_2d,
-            max_compute_workgroup_size_x: 1024,
-            max_compute_workgroup_size_y: 1024,
-            max_compute_invocations_per_workgroup: 1024,
+            max_compute_workgroup_size_x: adapter_limits.max_compute_workgroup_size_x.min(1024),
+            max_compute_workgroup_size_y: adapter_limits.max_compute_workgroup_size_y.min(1024),
+            max_compute_invocations_per_workgroup: adapter_limits
+                .max_compute_invocations_per_workgroup
+                .min(1024),
             ..adapter_limits.clone()
         };
 
@@ -129,7 +159,7 @@ impl WgpuContext {
 
         let device_arc = Arc::new(device.clone());
         let queue_arc = Arc::new(queue);
-        let profiler = GpuProfiler::new(&device, 4096);
+        let profiler = GpuProfiler::new(&device, 4096, timestamps);
         let uniform_arena = GpuUniformBuffer::new(&device, 1024 * 1024 * 4, "global_uniforms");
 
         Ok(Arc::new(Self {
@@ -327,4 +357,19 @@ impl Default for GpuConfig {
             min_batch_size_for_gpu: 128,
         }
     }
+}
+
+/// Drive the device until queued work completes.
+///
+/// Native wgpu needs an explicit pump before a `map_async` callback can run. On
+/// wasm the browser's event loop owns that, and blocking is not permitted, so
+/// this is a no-op and the caller's `.await` is what makes progress.
+pub fn drain(device: &wgpu::Device) {
+    #[cfg(not(target_arch = "wasm32"))]
+    match device.poll(wgpu::PollType::wait_indefinitely()) {
+        Ok(status) => log::debug!("GPU poll ok: {:?}", status),
+        Err(e) => panic!("GPU poll failed: {:?}", e),
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = device;
 }

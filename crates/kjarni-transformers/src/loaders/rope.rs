@@ -1,4 +1,4 @@
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::{WgpuContext, gpu_ops::blocks::rope::GpuRoPE};
 use crate::{rope::RoPE, traits::ModelMetadata};
 use anyhow::Result;
@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 pub struct LoadedRoPE {
     pub cpu: Arc<RoPE>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub gpu: Option<Arc<GpuRoPE>>,
 }
 
 impl LoadedRoPE {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn new(
         ctx: Option<&Arc<WgpuContext>>,
         meta: &ModelMetadata,
@@ -38,7 +38,7 @@ impl LoadedRoPE {
         Ok(Self { cpu: cpu_rope, gpu })
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
     pub fn new(meta: &ModelMetadata) -> Result<Self> {
         let cpu_rope = Arc::new(RoPE::new_with_scaling(
             meta.head_dim,

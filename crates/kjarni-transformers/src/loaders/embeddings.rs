@@ -1,19 +1,19 @@
 //! Unified embedding loading for all model architectures.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use ndarray::Array2;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::WgpuContext;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::gpu::{GpuEmbeddingWeights, GpuEmbeddings};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::gpu::{GpuTensor, GpuTensorPool};
 use crate::linear_layer::LinearLayer;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::models::base::ModelInput;
 use crate::tensor::DType;
 use crate::weights::ModelWeights;
@@ -114,24 +114,24 @@ impl EmbeddingConfigBuilder {
 
 pub enum EmbeddingInput<'a> {
     Cpu(&'a Array2<u32>),
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     Gpu(&'a GpuTensor),
 }
 
 /// Loaded embeddings that can be on CPU, GPU, or hybrid.
 pub struct LoadedEmbeddings {
     pub cpu: Option<Embeddings>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub gpu_weights: Option<GpuEmbeddingWeights>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub gpu_layer: Option<GpuEmbeddings>,
     pub config: EmbeddingConfig,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     context: Option<Arc<WgpuContext>>,
 }
 
 impl LoadedEmbeddings {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn new(
         ctx: Option<&Arc<WgpuContext>>,
         weights: &ModelWeights,
@@ -184,7 +184,7 @@ impl LoadedEmbeddings {
         })
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
     pub fn new(
         weights: &ModelWeights,
         config: EmbeddingConfig,
@@ -205,12 +205,12 @@ impl LoadedEmbeddings {
         })
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn word_embeddings_gpu(&self) -> Option<GpuTensor> {
         self.gpu_weights.as_ref().map(|w| w.word_embeddings.clone())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn with_shared_words(
         ctx: Option<&Arc<WgpuContext>>,
         weights: &ModelWeights,
@@ -293,7 +293,7 @@ impl LoadedEmbeddings {
         self.cpu.is_some()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     #[inline]
     pub fn is_gpu(&self) -> bool {
         self.gpu_weights.is_some()
@@ -313,7 +313,7 @@ impl LoadedEmbeddings {
         self.cpu.is_some()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn is_gpu_loaded(&self) -> bool {
         self.gpu_weights.is_some()
     }
@@ -338,7 +338,7 @@ impl LoadedEmbeddings {
         ))
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn embed(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -434,7 +434,7 @@ impl LoadedEmbeddings {
         Err(anyhow!("no embeddings loaded"))
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn encode(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -497,7 +497,7 @@ impl LoadedEmbeddings {
         Err(anyhow!("tokens on GPU but embeddings only on CPU"))
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn encode_cpu(
         &self,
         context: &Arc<WgpuContext>,
@@ -521,7 +521,7 @@ impl LoadedEmbeddings {
     }
 
     /// Performs embedding lookup from CPU token IDs.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn forward(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -562,7 +562,7 @@ impl LoadedEmbeddings {
     }
 
     /// Performs embedding lookup from GPU token IDs.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub async fn forward_gpu(
         &self,
         encoder: &mut wgpu::CommandEncoder,

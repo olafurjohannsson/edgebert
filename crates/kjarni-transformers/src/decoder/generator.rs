@@ -44,7 +44,7 @@ impl DecoderGenerator {
                 debug!("initializing cpu decoder backend");
                 AnyDecoderBackend::Cpu(CpuDecoderBackend)
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             Device::Wgpu => {
                 debug!("initializing gpu decoder backend");
                 let context = model
@@ -53,7 +53,7 @@ impl DecoderGenerator {
                 AnyDecoderBackend::Gpu(Arc::new(GpuDecoderBackend::new(context)?))
             }
             // No GPU backend is reachable in wasm: no context can be constructed.
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
             Device::Wgpu => {
                 return Err(anyhow!("GPU generation is not available in WebAssembly"));
             }

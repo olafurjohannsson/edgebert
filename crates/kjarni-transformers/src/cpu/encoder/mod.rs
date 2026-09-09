@@ -9,7 +9,7 @@ pub mod traits;
 mod transformer_encoder;
 pub use encoder_self_attention::EncoderSelfAttention;
 pub use traits::{CpuEncoder, CpuEncoderOps, SentenceEncoderModel};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 pub use traits::{GpuEncoder, GpuEncoderOps};
 pub use transformer_encoder::CpuTransformerEncoder;
 

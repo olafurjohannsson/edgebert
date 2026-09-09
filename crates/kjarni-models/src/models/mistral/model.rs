@@ -6,6 +6,8 @@ use std::sync::Arc;
 use anyhow::Result;
 // Only the wasm32 arms use the macro, so importing it unconditionally reads as an
 // unused import on native and gets pruned, which breaks the WebAssembly build.
+// Used by the wasm arms in both configurations: the CPU-only fallback and the
+// GPU build's refusal to block on a readback.
 #[cfg(target_arch = "wasm32")]
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -15,10 +17,10 @@ use tokenizers::Tokenizer;
 
 // Reuse Llama Decoders
 use crate::models::llama::cpu_decoder::LlamaCpuDecoder;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::models::llama::gpu_decoder::LlamaGpuDecoder;
 use crate::models::mistral::config::MistralConfig;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::gpu::{GpuFrameContext, GpuTensor, cache::GpuKVCache};
 
 use kjarni_transformers::{
@@ -80,7 +82,7 @@ impl DecoderModelFactory for MistralModel {
                 load_config.target_dtype,
             )?) as Box<dyn CpuDecoder>);
         } else if device.is_gpu() {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             if let Some(ctx) = context {
                 gpu = Some(Box::new(LlamaGpuDecoder::new(
                     ctx,
@@ -91,7 +93,7 @@ impl DecoderModelFactory for MistralModel {
                     load_config,
                 )?) as Box<dyn GpuDecoder>);
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
             return Err(anyhow!("GPU decoding is not available in WebAssembly"));
         }
 
@@ -163,7 +165,7 @@ impl InferenceModel for MistralModel {
     fn device(&self) -> Device {
         self.pipeline.plan().layers
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn context(&self) -> Option<Arc<WgpuContext>> {
         self.pipeline.context().cloned()
     }
@@ -186,7 +188,7 @@ impl LanguageModel for MistralModel {
                 )))
             }
             // No GPU cache without a GPU context, which wasm cannot build.
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             Device::Wgpu => {
                 let ctx = self.context().unwrap();
                 Ok(Box::new(GpuKVCache::new(
@@ -198,7 +200,7 @@ impl LanguageModel for MistralModel {
                     max_len,
                 )?))
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
             Device::Wgpu => Err(anyhow!("GPU cache is not available in WebAssembly")),
         }
     }
@@ -249,7 +251,7 @@ impl DecoderLanguageModel for MistralModel {
             None
         }
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn decoder_gpu_ops(&self) -> Option<&dyn GpuDecoderOps> {
         if self.pipeline.gpu_decoder().is_some() {
             Some(self)
@@ -301,7 +303,7 @@ impl CpuDecoderOps for MistralModel {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 impl GpuDecoderOps for MistralModel {
     fn decoder(&self) -> &dyn GpuDecoder {
         self.pipeline.gpu_decoder().unwrap()
@@ -333,6 +335,17 @@ impl GpuDecoderOps for MistralModel {
             let (enc, pool) = ctx.resources();
             lm.forward_gpu(enc, pool, h)
         } else {
+            // A browser cannot take this path: the readback below completes on the event
+            // loop, and `block_on` is what would be blocking it. Hanging the tab is worse
+            // than refusing, so refuse and let the caller pick a device.
+            #[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+            return Err(anyhow!(
+                "the LM head is on the CPU while the decoder is on the GPU, which needs a \
+                 blocking GPU readback that a browser cannot perform. Load the LM head onto \
+                 the GPU, or run the decoder on the CPU."
+            ));
+
+            #[cfg(not(all(target_arch = "wasm32", feature = "wasm-gpu")))]
             pollster::block_on(async {
                 let h_cpu = h.to_ndarray_3d().await?;
                 let logits = lm.forward_cpu(&h_cpu)?;

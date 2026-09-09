@@ -1,6 +1,6 @@
 //! Core model traits and data structures for Kjarni.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::WgpuContext;
 use crate::activations::Activation;
 pub use crate::cache::Cache;
@@ -9,7 +9,7 @@ use crate::models::base::RopeScalingConfig;
 use anyhow::Result;
 use ndarray::Array3;
 use std::any::Any;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use std::sync::Arc;
 
 /// Compute backend for model inference.
@@ -37,7 +37,7 @@ pub trait InferenceModel: Send + Sync {
     fn device(&self) -> Device;
 
     /// Returns the GPU context, if running on WebGPU.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn context(&self) -> Option<Arc<WgpuContext>> {
         None
     }

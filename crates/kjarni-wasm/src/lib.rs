@@ -813,6 +813,15 @@ impl WasmChat {
 impl WasmChat {
     /// Load a decoder model, reporting failure as a plain Rust error.
     pub fn load_core(data: &[u8], model_id: Option<&str>) -> anyhow::Result<WasmChat> {
+        Self::load_core_on(data, model_id, None)
+    }
+
+    /// `load_core`, but onto a caller-supplied device. `None` means the CPU.
+    pub fn load_core_on(
+        data: &[u8],
+        model_id: Option<&str>,
+        context: Option<std::sync::Arc<kjarni_transformers::WgpuContext>>,
+    ) -> anyhow::Result<WasmChat> {
         use kjarni_transformers::models::ModelType;
         use kjarni_transformers::pipeline::DecoderLoader;
 
@@ -831,15 +840,21 @@ impl WasmChat {
             .unwrap_or_default();
 
         let model: std::sync::Arc<dyn DecoderLanguageModel + Send + Sync> = match arch.as_str() {
-            "qwen2" => std::sync::Arc::new(DecoderLoader::load_from_kjq::<
+            "qwen2" => std::sync::Arc::new(DecoderLoader::load_from_kjq_on::<
                 kjarni_models::models::qwen::QwenModel,
-            >(&unpacked, None, model_type)?),
-            "llama" => std::sync::Arc::new(DecoderLoader::load_from_kjq::<
+            >(
+                &unpacked, None, model_type, context.clone()
+            )?),
+            "llama" => std::sync::Arc::new(DecoderLoader::load_from_kjq_on::<
                 kjarni_models::models::llama::LlamaModel,
-            >(&unpacked, None, model_type)?),
-            "mistral" => std::sync::Arc::new(DecoderLoader::load_from_kjq::<
+            >(
+                &unpacked, None, model_type, context.clone()
+            )?),
+            "mistral" => std::sync::Arc::new(DecoderLoader::load_from_kjq_on::<
                 kjarni_models::models::mistral::MistralModel,
-            >(&unpacked, None, model_type)?),
+            >(
+                &unpacked, None, model_type, context.clone()
+            )?),
             other => {
                 return Err(anyhow::anyhow!(
                     "unsupported architecture '{other}' for browser chat. \
@@ -1257,5 +1272,314 @@ impl WasmReranker {
     pub fn score(&self, query: &str, document: &str) -> Result<f32, JsValue> {
         futures::executor::block_on(self.inner.predict_pair(query, document))
             .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+}
+
+/// The adapter limits that decide whether the compute stack runs at all.
+///
+/// Shaders declaring more than `maxComputeInvocationsPerWorkgroup` threads fail
+/// to create, and weights larger than `maxStorageBufferBindingSize` must be split
+/// across bindings. WebGPU only guarantees 256 and 128MiB, well under what a
+/// native Vulkan adapter hands out.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+fn adapter_limits_of(context: &kjarni_transformers::WgpuContext) -> Result<JsValue, JsValue> {
+    let l = context.adapter.limits();
+    let out = serde_json::json!({
+        "maxComputeInvocationsPerWorkgroup": l.max_compute_invocations_per_workgroup,
+        "maxComputeWorkgroupSizeX": l.max_compute_workgroup_size_x,
+        "maxStorageBufferBindingSize": l.max_storage_buffer_binding_size,
+        "maxBufferSize": l.max_buffer_size,
+    });
+    serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Unpack a `.kjq` and load it onto a fresh WebGPU context.
+///
+/// Every GPU wrapper needs the same four steps, and the context has to outlive
+/// the model, so it comes back alongside it rather than being dropped here.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+async fn load_on_gpu<M: kjarni_transformers::pipeline::EncoderModelFactory>(
+    model_data: &[u8],
+) -> Result<
+    (
+        std::sync::Arc<M>,
+        std::sync::Arc<kjarni_transformers::WgpuContext>,
+    ),
+    JsValue,
+> {
+    let unpacked = kjq::unpack(model_data).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let context = kjarni_transformers::WgpuContext::new()
+        .await
+        .map_err(|e| JsValue::from_str(&format!("no WebGPU adapter: {e}")))?;
+
+    let model = EncoderLoader::load_from_bytes_with_context::<M>(
+        &unpacked.safetensors,
+        &unpacked.config_json,
+        unpacked.tokenizer_json.as_bytes(),
+        Some(context.clone()),
+        None,
+        None,
+    )
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    Ok((std::sync::Arc::new(model), context))
+}
+
+// ─── GPU encoder (browser WebGPU) ────────────────────────────────
+
+/// A sentence encoder running on the browser's WebGPU adapter.
+///
+/// Separate from [`WasmModel`] rather than a flag on it because the two have
+/// different shapes: acquiring an adapter is asynchronous, and so is every encode,
+/// since reading results back off the GPU is a real await rather than the CPU
+/// path's already-ready future.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+#[wasm_bindgen]
+pub struct WasmGpuEncoder {
+    model: std::sync::Arc<SentenceEncoder>,
+    context: std::sync::Arc<kjarni_transformers::WgpuContext>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+#[wasm_bindgen]
+impl WasmGpuEncoder {
+    /// Load a `.kjq` container onto the GPU.
+    ///
+    /// Rejects when the browser has no WebGPU adapter, which is the caller's cue
+    /// to fall back to [`WasmModel`].
+    #[wasm_bindgen(js_name = fromQuantized)]
+    pub async fn from_quantized(model_data: Vec<u8>) -> Result<WasmGpuEncoder, JsValue> {
+        let (model, context) = load_on_gpu::<SentenceEncoder>(&model_data).await?;
+        Ok(Self { model, context })
+    }
+
+    /// Embed one string. Resolves to an array of `dimension()` floats.
+    pub fn embed(&self, text: String) -> js_sys::Promise {
+        let model = self.model.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let v = model
+                .encode(&text)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            serde_wasm_bindgen::to_value(&v).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
+    }
+
+    /// Embed a batch. Resolves to an array of arrays.
+    #[wasm_bindgen(js_name = embedBatch)]
+    pub fn embed_batch(&self, texts: Vec<String>) -> js_sys::Promise {
+        let model = self.model.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            let v = model
+                .encode_batch(&refs)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            serde_wasm_bindgen::to_value(&v).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
+    }
+
+    pub fn dimension(&self) -> usize {
+        use kjarni_transformers::cpu::encoder::traits::EncoderLanguageModel;
+        self.model.dimension()
+    }
+
+    /// What the browser's adapter actually grants.
+    ///
+    /// Two of these decide whether the compute stack runs here at all: shaders
+    /// declaring more than `maxComputeInvocationsPerWorkgroup` threads fail to
+    /// create, and weights larger than `maxStorageBufferBindingSize` have to be
+    /// split across bindings. WebGPU only guarantees 256 and 128MiB.
+    #[wasm_bindgen(js_name = adapterLimits)]
+    pub fn adapter_limits(&self) -> Result<JsValue, JsValue> {
+        adapter_limits_of(&self.context)
+    }
+}
+
+// ─── GPU reranker ────────────────────────────────────────────────
+
+/// A cross-encoder reranker running on the browser's WebGPU adapter.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+#[wasm_bindgen]
+pub struct WasmGpuReranker {
+    model: std::sync::Arc<CrossEncoder>,
+    context: std::sync::Arc<kjarni_transformers::WgpuContext>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+#[wasm_bindgen]
+impl WasmGpuReranker {
+    #[wasm_bindgen(js_name = fromQuantized)]
+    pub async fn from_quantized(model_data: Vec<u8>) -> Result<WasmGpuReranker, JsValue> {
+        let (model, context) = load_on_gpu::<CrossEncoder>(&model_data).await?;
+        Ok(Self { model, context })
+    }
+
+    /// Rank `documents` against `query`, best first. Scores are raw logits, the
+    /// same as the CPU path and as torch: pass them through `sigmoid` for a 0..1
+    /// scale.
+    pub fn rerank(&self, query: String, documents: Vec<String>, limit: usize) -> js_sys::Promise {
+        let model = self.model.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            if documents.is_empty() {
+                return serde_wasm_bindgen::to_value::<Vec<RerankResult>>(&vec![])
+                    .map_err(|e| JsValue::from_str(&e.to_string()));
+            }
+            let doc_refs: Vec<&str> = documents.iter().map(|d| d.as_str()).collect();
+            let ranked = model
+                .rerank_top_k(&query, &doc_refs, limit)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+            let results: Vec<RerankResult> = ranked
+                .into_iter()
+                .map(|(index, score)| RerankResult {
+                    index,
+                    score,
+                    text: documents[index].clone(),
+                })
+                .collect();
+            serde_wasm_bindgen::to_value(&results).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
+    }
+
+    /// Score a single query-document pair.
+    pub fn score(&self, query: String, document: String) -> js_sys::Promise {
+        let model = self.model.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let s = model
+                .predict_pair(&query, &document)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(JsValue::from_f64(s as f64))
+        })
+    }
+
+    /// See [`WasmGpuEncoder::adapter_limits`].
+    #[wasm_bindgen(js_name = adapterLimits)]
+    pub fn adapter_limits(&self) -> Result<JsValue, JsValue> {
+        adapter_limits_of(&self.context)
+    }
+}
+
+// ─── GPU classifier ──────────────────────────────────────────────
+
+/// A sequence classifier running on the browser's WebGPU adapter.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+#[wasm_bindgen]
+pub struct WasmGpuClassifier {
+    model: std::sync::Arc<SequenceClassifier>,
+    context: std::sync::Arc<kjarni_transformers::WgpuContext>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+#[wasm_bindgen]
+impl WasmGpuClassifier {
+    #[wasm_bindgen(js_name = fromQuantized)]
+    pub async fn from_quantized(model_data: Vec<u8>) -> Result<WasmGpuClassifier, JsValue> {
+        let (model, context) = load_on_gpu::<SequenceClassifier>(&model_data).await?;
+        Ok(Self { model, context })
+    }
+
+    /// Every label with its score, highest first.
+    pub fn classify(&self, text: String) -> js_sys::Promise {
+        let model = self.model.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let k = model.num_labels();
+            let results = model
+                .classify_top_k(&text, k)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let out: Vec<ClassifyResult> = results
+                .into_iter()
+                .map(|r| ClassifyResult {
+                    label: r.label,
+                    score: r.score,
+                    index: r.index,
+                })
+                .collect();
+            serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&e.to_string()))
+        })
+    }
+
+    pub fn labels(&self) -> Vec<String> {
+        self.model.labels().map(|l| l.to_vec()).unwrap_or_default()
+    }
+
+    /// See [`WasmGpuEncoder::adapter_limits`].
+    #[wasm_bindgen(js_name = adapterLimits)]
+    pub fn adapter_limits(&self) -> Result<JsValue, JsValue> {
+        adapter_limits_of(&self.context)
+    }
+}
+
+// ─── GPU chat (browser WebGPU) ───────────────────────────────────
+
+/// A decoder running on the browser's WebGPU adapter.
+///
+/// Separate from [`WasmChat`] for the same reason the encoder is: acquiring an
+/// adapter is asynchronous, and generation reads logits back off the GPU once per
+/// token, so every call is a real await rather than the CPU path's already-ready
+/// future.
+///
+/// Expect modest tokens per second. The per-dispatch cost the CPU path does not
+/// pay is charged once per token here, and it has not been optimised.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+#[wasm_bindgen]
+pub struct WasmGpuChat {
+    /// `Rc`, not `Arc`: `WasmChat` keeps its turns in a `RefCell` and so is not
+    /// `Sync`, and wasm is single threaded, so there is nothing to share across.
+    inner: std::rc::Rc<WasmChat>,
+    context: std::sync::Arc<kjarni_transformers::WgpuContext>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm-gpu"))]
+#[wasm_bindgen]
+impl WasmGpuChat {
+    /// Load a `.kjq` decoder onto the GPU.
+    ///
+    /// Rejects when there is no WebGPU adapter, or when the adapter cannot run
+    /// kjarni's shaders, which is the caller's cue to fall back to [`WasmChat`].
+    #[wasm_bindgen(js_name = fromQuantized)]
+    pub async fn from_quantized(
+        model_data: Vec<u8>,
+        model_id: Option<String>,
+    ) -> Result<WasmGpuChat, JsValue> {
+        let context = kjarni_transformers::WgpuContext::new()
+            .await
+            .map_err(|e| JsValue::from_str(&format!("no usable WebGPU adapter: {e}")))?;
+
+        let inner = WasmChat::load_core_on(&model_data, model_id.as_deref(), Some(context.clone()))
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        Ok(Self {
+            inner: std::rc::Rc::new(inner),
+            context,
+        })
+    }
+
+    /// Generate a continuation. Resolves to the generated text.
+    pub fn generate(&self, prompt: String, max_new_tokens: usize) -> js_sys::Promise {
+        let chat = self.inner.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let config = kjarni_transformers::common::GenerationConfig {
+                max_new_tokens: Some(max_new_tokens),
+                strategy: kjarni_transformers::common::DecodingStrategy::Greedy,
+                ..Default::default()
+            };
+            let out = chat
+                .generator
+                .generate(&prompt, &config, None)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            Ok(JsValue::from_str(&out))
+        })
+    }
+
+    /// See [`WasmGpuEncoder::adapter_limits`].
+    #[wasm_bindgen(js_name = adapterLimits)]
+    pub fn adapter_limits(&self) -> Result<JsValue, JsValue> {
+        adapter_limits_of(&self.context)
     }
 }

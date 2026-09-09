@@ -3,17 +3,17 @@
 //! This module provides high-level, user-facing traits that abstract over
 //! the low-level architecture traits in `traits.rs`.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use std::sync::Arc;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::WgpuContext;
 use crate::cpu::encoder::buffers::EncoderBuffers;
 use crate::cpu::encoder::config::{EncodingConfig, PoolingStrategy};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::gpu::{GpuFrameContext, GpuTensor, GpuTensorPool};
 use crate::models::base::LanguageModel;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::models::base::ModelInput;
 use crate::pooling::mean_pool;
 use crate::traits::CpuTransformerCore;
@@ -39,14 +39,14 @@ pub enum ClassificationMode {
 pub trait EncoderLanguageModel: LanguageModel {
     fn encoder_cpu_ops(&self) -> Option<&dyn CpuEncoderOps>;
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn encoder_gpu_ops(&self) -> Option<&dyn GpuEncoderOps>;
 
     fn dimension(&self) -> usize {
         self.hidden_size()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn encoder_dimensions(&self) -> usize {
         // either GPU or CPU
         match self.device() {
@@ -65,7 +65,7 @@ pub trait EncoderLanguageModel: LanguageModel {
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
     fn encoder_dimensions(&self) -> usize {
         let ops = self
             .encoder_cpu_ops()
@@ -79,7 +79,7 @@ pub trait EncoderLanguageModel: LanguageModel {
         Ok(batch_hidden_states)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     async fn get_hidden_states_batch_from_ids(
         &self,
         input_ids: &Array2<u32>,
@@ -149,7 +149,7 @@ pub trait EncoderLanguageModel: LanguageModel {
         Ok((hidden_states, attention_mask_f32))
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
     async fn get_hidden_states_batch_from_ids(
         &self,
         input_ids: &Array2<u32>,
@@ -368,7 +368,7 @@ pub trait CpuEncoderOps: Send + Sync {
 }
 
 /// Output from GPU encoder.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 #[derive(Debug)]
 pub struct GpuEncoderOutput {
     /// Final hidden states on GPU: `[batch_size, sequence_length, hidden_size]`
@@ -383,14 +383,14 @@ pub struct GpuEncoderOutput {
 /// those signatures compiling against a value that can only ever be `None`, which
 /// is far less invasive than threading `#[cfg]` through the pipeline. Nothing can
 /// implement it usefully, so no GPU path can be reached by accident.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
 pub trait GpuEncoder: Send + Sync {}
 
 /// Placeholder GPU encoder ops for wasm builds. See [`GpuEncoder`].
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
 pub trait GpuEncoderOps: Send + Sync {}
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 pub trait GpuEncoder: Send + Sync {
     /// Compute embeddings only
     fn embed(
@@ -492,7 +492,7 @@ pub trait GpuEncoder: Send + Sync {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 pub trait GpuEncoderOps: Send + Sync {
     /// Access the underlying encoder (transformer layers)
     fn encoder(&self) -> &dyn GpuEncoder;

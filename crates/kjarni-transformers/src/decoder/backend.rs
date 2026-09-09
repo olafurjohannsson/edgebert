@@ -1,7 +1,7 @@
 //! Type-erased backend that dispatches to CPU or GPU implementations.
 
 use std::any::Any;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -10,7 +10,7 @@ use ndarray::{Array1, Array2};
 
 use crate::cache::Cache;
 use crate::decoder::prelude::*;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use crate::gpu::GpuTensor;
 
 #[derive(Clone)]
@@ -18,7 +18,7 @@ pub enum AnyDecoderBackend {
     Cpu(CpuDecoderBackend),
     // No GPU backend exists on wasm, so the variant does not either. Every match on
     // this enum is exhaustive on both targets because the arm is gated too.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     Gpu(Arc<GpuDecoderBackend>),
 }
 
@@ -27,7 +27,7 @@ impl AnyDecoderBackend {
         AnyDecoderBackend::Cpu(CpuDecoderBackend::new())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     pub fn gpu(backend: Arc<GpuDecoderBackend>) -> Self {
         AnyDecoderBackend::Gpu(backend)
     }
@@ -37,16 +37,16 @@ impl AnyDecoderBackend {
     }
 
     pub fn is_gpu(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
         return matches!(self, AnyDecoderBackend::Gpu(_));
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
         return false;
     }
 
     pub fn backend_type(&self) -> &'static str {
         match self {
             AnyDecoderBackend::Cpu(_) => "CPU",
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             AnyDecoderBackend::Gpu(_) => "GPU",
         }
     }
@@ -62,7 +62,7 @@ impl DecoderGenerationBackend for AnyDecoderBackend {
                 let token = backend.new_decode_token()?;
                 Ok(Box::new(token))
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             AnyDecoderBackend::Gpu(backend) => {
                 let token = backend.new_decode_token()?;
                 Ok(Box::new(token))
@@ -78,7 +78,7 @@ impl DecoderGenerationBackend for AnyDecoderBackend {
                     .ok_or_else(|| anyhow!("cpu backend expected Array2<u32>, got wrong type"))?;
                 backend.update_decode_token(concrete, new_token_id)
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             AnyDecoderBackend::Gpu(backend) => {
                 let concrete = token
                     .downcast_mut::<GpuTensor>()
@@ -96,7 +96,7 @@ impl DecoderGenerationBackend for AnyDecoderBackend {
     ) -> Result<Array1<f32>> {
         match self {
             AnyDecoderBackend::Cpu(backend) => backend.prefill(model, tokens, cache).await,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             AnyDecoderBackend::Gpu(backend) => backend.prefill(model, tokens, cache).await,
         }
     }
@@ -114,7 +114,7 @@ impl DecoderGenerationBackend for AnyDecoderBackend {
             AnyDecoderBackend::Cpu(backend) => {
                 backend.prefill_at(model, tokens, start_pos, cache).await
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             AnyDecoderBackend::Gpu(backend) => {
                 backend.prefill_at(model, tokens, start_pos, cache).await
             }
@@ -135,7 +135,7 @@ impl DecoderGenerationBackend for AnyDecoderBackend {
                     .ok_or_else(|| anyhow!("cpu backend expected Array2<u32>, got wrong type"))?;
                 backend.decode_one(model, concrete, seq_len, cache).await
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             AnyDecoderBackend::Gpu(backend) => {
                 let concrete = token
                     .downcast_ref::<GpuTensor>()
@@ -150,7 +150,7 @@ impl std::fmt::Debug for AnyDecoderBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AnyDecoderBackend::Cpu(_) => write!(f, "AnyDecoderBackend::Cpu"),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             AnyDecoderBackend::Gpu(_) => write!(f, "AnyDecoderBackend::Gpu"),
         }
     }

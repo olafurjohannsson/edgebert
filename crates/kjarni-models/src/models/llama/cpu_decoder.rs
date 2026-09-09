@@ -1,6 +1,6 @@
 //! CPU implementation of the Llama decoder architecture.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::WgpuContext;
 use std::sync::Arc;
 
@@ -112,7 +112,7 @@ impl InferenceModel for LlamaCpuDecoder {
         Device::Cpu
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn context(&self) -> Option<Arc<WgpuContext>> {
         None
     }

@@ -35,6 +35,8 @@ impl GpuFeedForwardWeights {
         }
     }
 }
+#[allow(clippy::large_enum_variant)] // built once per model; boxing would cost a
+// dereference inside the per-layer encode path to save stack that is never hot.
 pub enum GpuFeedForward {
     Standard(GpuFeedForwardStd),
     SwiGLU(GpuSwiGLUFFN),

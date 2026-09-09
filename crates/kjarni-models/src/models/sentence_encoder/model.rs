@@ -2,9 +2,9 @@
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::gpu::{GpuTensor, GpuTensorPool};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::models::base::ModelInput;
 // Filesystem paths are a native-only concern: the wasm builds load from bytes.
 #[cfg(not(target_arch = "wasm32"))]
@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokenizers::Tokenizer;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::cpu::encoder::traits::GpuEncoderOps;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 use kjarni_transformers::gpu::encoder::GpuTransformerEncoder;
 #[cfg(not(target_arch = "wasm32"))]
 use kjarni_transformers::pipeline::EncoderLoader;
@@ -88,7 +88,7 @@ impl EncoderModelFactory for SentenceEncoder {
                     load_config,
                 )?) as Box<dyn CpuEncoder>);
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
             Device::Wgpu => {
                 let ctx = context.ok_or_else(|| anyhow!("GPU context required"))?;
                 gpu = Some(Box::new(GpuTransformerEncoder::new(
@@ -101,7 +101,7 @@ impl EncoderModelFactory for SentenceEncoder {
             }
             // No GPU backend exists on wasm, and no context can be built,
             // so this arm is unreachable rather than merely unsupported.
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
             Device::Wgpu => {
                 return Err(anyhow!("GPU inference is not available in WebAssembly"));
             }
@@ -351,7 +351,7 @@ impl InferenceModel for SentenceEncoder {
     fn device(&self) -> Device {
         self.pipeline.plan().layers
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn context(&self) -> Option<Arc<WgpuContext>> {
         self.pipeline.context().cloned()
     }
@@ -378,7 +378,7 @@ impl CpuEncoderOps for SentenceEncoder {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 impl GpuEncoderOps for SentenceEncoder {
     fn encoder(&self) -> &dyn GpuEncoder {
         self.pipeline
@@ -409,7 +409,7 @@ impl EncoderLanguageModel for SentenceEncoder {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
     fn encoder_gpu_ops(&self) -> Option<&dyn GpuEncoderOps> {
         if self.pipeline.gpu_encoder().is_some() {
             Some(self)

@@ -28,7 +28,7 @@ export KJARNI_KJQ_DIR="$KJQ_DIR"
 export KJARNI_CLIP_FIXTURES="${KJARNI_CLIP_FIXTURES:-/tmp/kjarni-clip-fixtures}"
 export KJARNI_CLIP_PHOTOS="${KJARNI_CLIP_PHOTOS:-$KJARNI_CLIP_FIXTURES/photos}"
 
-ALL_STAGES=(fmt clippy wasm-check fixtures clip-fixtures test-debug test-release csharp cpp wasm-browser python typescript)
+ALL_STAGES=(fmt clippy wasm-check fixtures clip-fixtures test-debug test-release csharp cpp wasm-browser wasm-gpu python typescript)
 
 declare -A RESULT ELAPSED
 FAILED=0
@@ -108,7 +108,17 @@ stage_clippy() {
     cargo clippy --workspace --all-targets -- -D warnings &&
         cargo clippy --workspace --all-targets --features kjarni-models/image-io -- -D warnings
 }
-stage_wasm_check() { cargo check -p kjarni-wasm --target wasm32-unknown-unknown --no-default-features; }
+# Both wasm configurations, because they select different code. The GPU stack is
+# gated by roughly ninety `any(not(wasm32), feature = "wasm-gpu")` predicates, and
+# a single wrong one breaks a configuration nobody builds by default. Checking
+# only the CPU bundle is how that would ship green.
+stage_wasm_check() {
+    cargo check -p kjarni-wasm --target wasm32-unknown-unknown --no-default-features &&
+        cargo check -p kjarni-wasm --target wasm32-unknown-unknown \
+            --no-default-features --features wasm-gpu &&
+        cargo clippy -p kjarni-wasm --target wasm32-unknown-unknown \
+            --no-default-features --features wasm-gpu -- -D warnings
+}
 
 # The .kjq fixtures several suites need. Built from whatever the model cache
 # already holds, so this is cheap after the first run.
@@ -271,6 +281,20 @@ stage_cpp() {
 }
 
 # The one check that loads the artefact people actually download.
+# The GPU bundle in a real browser. Skips rather than fails without an adapter:
+# CI runners have no GPU, and the compile checks above already cover the code.
+stage_wasm_gpu() {
+    command -v wasm-pack >/dev/null || { echo "wasm-pack not installed"; return 1; }
+    ( cd crates/kjarni-wasm \
+      && RUSTFLAGS='-C target-feature=+simd128' \
+         wasm-pack build --release --target web --out-dir pkg-gpu \
+           -- --no-default-features --features wasm-gpu ) || return 1
+    ( cd crates/kjarni-wasm/tests/browser \
+      && npm install --no-audit --no-fund >/dev/null \
+      && npx playwright install chromium >/dev/null 2>&1
+      KJARNI_PKG_DIR=../../pkg-gpu node run-gpu.mjs )
+}
+
 stage_wasm_browser() {
     command -v wasm-pack >/dev/null || { echo "wasm-pack not installed"; return 1; }
     ( cd crates/kjarni-wasm \

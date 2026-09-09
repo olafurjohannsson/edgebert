@@ -8,7 +8,7 @@
 pub mod config;
 // No GPU backend on wasm.
 pub mod cpu_decoder;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
 pub mod gpu_decoder;
 pub mod model;
 

@@ -183,13 +183,13 @@ pub fn matmul_2d_cpu_q4_k(a: &ArrayView2<f32>, b_weights: &[BlockQ4_K]) -> Array
         let _a_row = &a_s.as_slice().unwrap()[row * k..(row + 1) * k];
         let out_row = &mut c.as_slice_mut().unwrap()[row * n..(row + 1) * n];
 
-        for j in 0..n {
+        for (j, out) in out_row.iter_mut().enumerate() {
             let num_blocks_per_row = k / k_per_block;
             let start = j * num_blocks_per_row;
             let end = start + num_blocks_per_row;
             let _ = &b_weights[start..end];
             // TODO: scalar q4_k dot product
-            out_row[j] = 0.0;
+            *out = 0.0;
         }
     }
 
@@ -213,10 +213,10 @@ pub fn matmul_2d_cpu_q6_k(a: &ArrayView2<f32>, b_weights: &[BlockQ6_K]) -> Array
         let a_q8 = quantize_row_q8_k(a_row);
         let out_row = &mut c.as_slice_mut().unwrap()[row * n..(row + 1) * n];
 
-        for j in 0..n {
+        for (j, out) in out_row.iter_mut().enumerate() {
             let start = j * num_blocks_per_row;
             let end = start + num_blocks_per_row;
-            out_row[j] = vec_dot_q6k_q8k_scalar(k, &b_weights[start..end], &a_q8);
+            *out = vec_dot_q6k_q8k_scalar(k, &b_weights[start..end], &a_q8);
         }
     }
 

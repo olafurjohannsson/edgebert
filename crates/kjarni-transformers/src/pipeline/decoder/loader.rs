@@ -217,6 +217,19 @@ impl DecoderLoader {
         load_config: Option<ModelLoadConfig>,
         model_type: Option<ModelType>,
     ) -> Result<M> {
+        Self::load_from_kjq_on::<M>(unpacked, load_config, model_type, None)
+    }
+
+    /// Load a decoder from a `.kjq` container onto a caller-supplied GPU context.
+    ///
+    /// Passing `None` is exactly [`Self::load_from_kjq`]. The browser counterpart to
+    /// the context argument on `load_from_pretrained`.
+    pub fn load_from_kjq_on<M: DecoderModelFactory>(
+        unpacked: &crate::weights::kjq::KjqUnpacked,
+        load_config: Option<ModelLoadConfig>,
+        model_type: Option<ModelType>,
+        context: Option<Arc<WgpuContext>>,
+    ) -> Result<M> {
         use crate::weights::kjq::KjqEncoding;
 
         let weights = ModelWeights::from_kjq(unpacked)?;
@@ -235,6 +248,7 @@ impl DecoderLoader {
             unpacked.tokenizer_json.as_bytes(),
             load_config,
             model_type,
+            context,
         )
     }
 
@@ -258,6 +272,7 @@ impl DecoderLoader {
             tokenizer_json,
             load_config,
             model_type,
+            None,
         )
     }
 
@@ -268,6 +283,7 @@ impl DecoderLoader {
         tokenizer_json: &[u8],
         load_config: ModelLoadConfig,
         model_type: Option<ModelType>,
+        context: Option<Arc<WgpuContext>>,
     ) -> Result<M> {
         let _ = config_json;
 
@@ -283,10 +299,17 @@ impl DecoderLoader {
         }));
         tokenizer.with_padding(None);
 
-        // The wasm constructor takes no context and no GPU flag.
-        #[cfg(not(target_arch = "wasm32"))]
-        let rope = LoadedRoPE::new(None, &meta, false)?;
-        #[cfg(target_arch = "wasm32")]
+        // A context is the only signal for which device to use, exactly as in the
+        // encoder's from-bytes path: the caller either handed one over or it did not.
+        let device = if context.is_some() {
+            Device::Wgpu
+        } else {
+            Device::Cpu
+        };
+
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-gpu"))]
+        let rope = LoadedRoPE::new(context.as_ref(), &meta, device.is_gpu())?;
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-gpu")))]
         let rope = LoadedRoPE::new(&meta)?;
 
         let (cpu_decoder, gpu_decoder) = M::build_backends(
@@ -295,13 +318,14 @@ impl DecoderLoader {
             &layout,
             &rope,
             load_config,
-            None,
-            Device::Cpu,
+            context.as_ref(),
+            device,
         )?;
 
         let pipeline: DecoderPipeline = DecoderPipelineBuilder::new(&weights, config.clone())
             .with_load_config(load_config)
             .with_backends(cpu_decoder, gpu_decoder)
+            .with_context_opt(context)
             .build()?;
 
         let chat_template: Option<Box<dyn ChatTemplate>> = model_type.and_then(|mt| {

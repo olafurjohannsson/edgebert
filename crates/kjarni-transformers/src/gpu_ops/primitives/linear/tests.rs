@@ -451,3 +451,122 @@ async fn fused_row_range_uploads_the_same_rows_the_cpu_slices() -> Result<()> {
     }
     Ok(())
 }
+
+// ─── Q8_0 ────────────────────────────────────────────────────────
+//
+// Unlike Q4_K these need no GGUF: Q8_0 is one f16 scale and 32 int8 values, so a
+// matrix can be quantised on the spot and the reference is just the dequantised
+// blocks multiplied out in f32. That makes the comparison exact by construction --
+// both sides are meant to compute `sum(input * d * qs)` over the same blocks -- and
+// it means the test runs on any machine with a GPU.
+//
+// What can actually go wrong is the repack. The stored block is 34 bytes, which
+// leaves `qs` two bytes out of word alignment, so the upload moves the scale into a
+// word of its own. If that layout and the shader's indexing ever disagree, the
+// output stays plausible while being wrong, which is what these catch.
+
+/// Quantise a deterministic pseudo-random `[n, k]` matrix, multiply an `[m, k]`
+/// input by it on both devices, and return `(gpu, cpu)`.
+async fn run_q8(m: usize, n: usize, k: usize) -> Result<(Array2<f32>, Array2<f32>)> {
+    use crate::linear_layer::LinearData;
+    use crate::tensor::QuantizedMatrix;
+    use std::sync::Arc;
+
+    let mut state = 0x243F6A8885A308D3u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        ((state >> 40) as f32 / 8_388_608.0) - 1.0
+    };
+
+    let weights = Array2::from_shape_fn((n, k), |_| next());
+    let input = Array2::from_shape_fn((m, k), |_| next());
+
+    let blocks = crate::cpu::kernels::quantize::quantize_matrix_q8_0(&weights)?;
+    let matrix = QuantizedMatrix {
+        blocks,
+        shape: [n, k],
+    };
+
+    // The reference: the same blocks the GPU gets, dequantised and multiplied in
+    // f32. Not the original `weights`, which would fold quantisation error into the
+    // comparison and hide a layout bug behind it.
+    let dequantized = matrix.dequantize()?;
+    let cpu = input.dot(&dequantized.t());
+
+    let context = WgpuContext::new().await?;
+    let linear = GpuLinearLayer::new(&context);
+
+    // Through `LinearLayer::to_gpu_tensor`, because that is the path a loaded
+    // decoder takes; a hand-built `TensorView` would skip the repack under test.
+    let layer = crate::linear_layer::LinearLayer {
+        data: LinearData::Q8_0(Arc::new(matrix)),
+        bias: None,
+        // Irrelevant here: the Q8_0 path never reaches the f32 dispatch.
+        f32_strategy: crate::linear_layer::F32MatmulStrategy::Faer,
+    };
+    let gpu_w = layer.to_gpu_tensor(&context, "q8_weights")?;
+    let gpu_in = GpuTensor::from_ndarray(&context, &input)?;
+    let gpu_out = GpuTensor::uninitialized(&context, vec![m, n], DType::F32, "q8_out");
+
+    let mut enc = context.device.create_command_encoder(&Default::default());
+    linear.encode(&mut enc, &gpu_in, &gpu_w, &gpu_out);
+    context.queue.submit(std::iter::once(enc.finish()));
+
+    let (v, out_shape) = read_gpu_tensor_to_vec::<f32>(&gpu_out).await?;
+    let gpu = Array2::from_shape_vec((out_shape[0], out_shape[1]), v)?;
+    Ok((gpu, cpu))
+}
+
+#[tokio::test]
+#[ignore = "GPU required"]
+async fn q8_gemv_matches_cpu() -> Result<()> {
+    // `n` deliberately includes values that are not multiples of the four rows a
+    // GEMV workgroup owns, so the tail path is covered.
+    for (n, k) in [(64, 64), (128, 256), (255, 128), (33, 512), (1, 32)] {
+        let (gpu, cpu) = run_q8(1, n, k).await?;
+        report(&format!("q8 gemv [{n}x{k}]"), &gpu, &cpu, &[n, k]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "GPU required"]
+async fn q8_batched_matches_cpu() -> Result<()> {
+    for (m, n, k) in [(4, 64, 128), (8, 129, 256), (2, 32, 64)] {
+        let (gpu, cpu) = run_q8(m, n, k).await?;
+        report(&format!("q8 bmm [{m}x{k} @ {n}]"), &gpu, &cpu, &[n, k]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "GPU required"]
+async fn q8_repack_preserves_every_value() -> Result<()> {
+    use crate::cpu::kernels::q_common::BlockQ8_0;
+    use half::f16;
+
+    // The repack is the one place a silent corruption could live, so check it
+    // directly rather than only through a matmul that averages 128 values together.
+    let blocks: Vec<BlockQ8_0> = (0..3)
+        .map(|b| BlockQ8_0 {
+            d: f16::from_f32(0.5 + b as f32),
+            qs: std::array::from_fn(|i| (i as i32 - 16) as i8),
+        })
+        .collect();
+
+    let packed = crate::gpu::tensor::repack_q8_0(&blocks);
+    assert_eq!(packed.len(), blocks.len() * 36, "9 words per block");
+
+    for (b, block) in blocks.iter().enumerate() {
+        let o = b * 36;
+        let d = f16::from_bits(u16::from_le_bytes([packed[o], packed[o + 1]]));
+        assert_eq!(d, block.d, "block {b} scale");
+        assert_eq!(&packed[o + 2..o + 4], &[0, 0], "block {b} scale padding");
+        for (i, &q) in block.qs.iter().enumerate() {
+            assert_eq!(packed[o + 4 + i] as i8, q, "block {b} value {i}");
+        }
+    }
+    Ok(())
+}
