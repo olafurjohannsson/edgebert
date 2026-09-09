@@ -199,7 +199,9 @@ async fn kjq8_decoder_loads_and_generates() {
     use kjarni_transformers::weights::kjq::{self, KjqEncoding};
 
     let dir = std::env::var("KJARNI_KJQ_DIR").unwrap_or_else(|_| "/tmp/kjq".into());
-    let path = std::path::Path::new(&dir).join("qwen05b-kjq8.kjq");
+    // Named `-q8` though it carries KJQ8: that is the basename the published
+    // path uses, and the fixture builder follows it.
+    let path = std::path::Path::new(&dir).join("qwen05b-q8.kjq");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("skipping: {} not present", path.display());
         eprintln!("  build it with: quantize_model.py --format kjq8");
